@@ -7,8 +7,13 @@ import xml.etree.ElementTree as ET
 
 from playwright.sync_api import sync_playwright
 
-HERE = pathlib.Path(__file__).parent
+# resolve() 保证拿到绝对路径：APP.as_uri() 对相对路径会直接抛 ValueError
+HERE = pathlib.Path(__file__).resolve().parent
 ROOT = HERE.parent
+# 保证无论从哪个目录调用，都能 import 到同目录的辅助模块
+sys.path.insert(0, str(HERE))
+
+from pngread import dark_pixel_count
 APP = ROOT / "output" / "mermaid-local-editor.html"
 # 沙箱里装浏览器时的固定位置（CI 上用 playwright 自带的，无需指定）
 FALLBACK_CHROME = "/root/.cache/ms-playwright/chromium-1243/chrome-linux/chrome"
@@ -429,11 +434,7 @@ flowchart TD
                 let bin = ''; for (let i = 0; i < buf.length; i++) bin += String.fromCharCode(buf[i]);
                 return btoa(bin);
             }""")
-            from PIL import Image
-            import io
-            img = Image.open(io.BytesIO(base64.b64decode(b64))).convert("L")
-            px = list(img.getdata())
-            return sum(1 for v in px if v < 128)
+            return dark_pixel_count(base64.b64decode(b64))
 
         with_text = png_dark_pixels("flowchart TD\n  A[唯一文字XYZ] --> B[另一个]\n")
         without_text = png_dark_pixels("flowchart TD\n  A --> B\n")
