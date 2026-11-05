@@ -39,6 +39,10 @@ const state = {
   fitOnRender: true,
   userAdjusted: false,
   cfg: {},             // 来自 frontmatter 的 config
+  barCollapsed: false,   // 顶栏收起
+  blockCollapsed: false, // 图块导航栏收起
+  sideCollapsed: false,  // 侧栏收起
+  focusBlock: 0,         // 当前聚焦的图块下标（多图模式）
 };
 
 // ---------------------------------------------------------------------------
@@ -378,20 +382,21 @@ function extractBlocks(code) {
   // 否则整篇 markdown 会被当成 mermaid 源码去解析，直接报「没有匹配到图类型」。
   if (found.length >= 1) {
     state.blocks = found;
+    if (state.focusBlock >= found.length) state.focusBlock = 0;
+    const bar = $('#blockBar');
     const nav = $('#blockNav');
-    nav.classList.remove('hidden');
-    nav.innerHTML = found.map((_, i) => `<button class="mini" data-block="${i}">#${i + 1}</button>`).join('');
+    bar.classList.remove('hidden');
+    $('#blockCount').textContent = String(found.length);
+    nav.innerHTML = found.map((_, i) => `<button class="mini" data-block="${i}" title="跳到第 ${i + 1} 个图">#${i + 1}</button>`).join('');
     Array.from(nav.querySelectorAll('button')).forEach((b) => {
       b.addEventListener('click', () => {
-        const i = Number(b.dataset.block);
-        const el = $('#zoomLayer').querySelectorAll('.blk')[i];
-        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        focusBlock(Number(b.dataset.block));
       });
     });
     return found.map((c) => ({ code: c }));
   }
   state.blocks = [];
-  $('#blockNav').classList.add('hidden');
+  $('#blockBar').classList.add('hidden');
   return [{ code }];
 }
 
@@ -615,28 +620,74 @@ function applyTransform() {
   $('#zoomLabel').textContent = `${Math.round(state.view.k * 100)}%`;
 }
 
-function fitZoom() {
+/**
+ * 取某张图在缩放图层里的「内容坐标」位置。
+ * SVG 元素没有 offsetTop/offsetLeft（那是 HTMLElement 才有的），
+ * 所以用父级 .blk 的偏移 + 图在 .blk 内的相对位移（除以当前缩放还原成内容坐标）。
+ */
+function svgContentOffset(svg) {
+  const blk = svg.closest('.blk');
+  if (!blk) return { x: 0, y: 0 };
+  const k = state.view.k || 1;
+  const br = blk.getBoundingClientRect();
+  const sr = svg.getBoundingClientRect();
+  return {
+    x: (blk.offsetLeft || 0) + (sr.left - br.left) / k,
+    y: (blk.offsetTop || 0) + (sr.top - br.top) / k,
+  };
+}
+
+/**
+ * 适应窗口。
+ * 多图模式（markdown 导入）下只适应**指定的那一张**——否则最宽的那张图
+ * 会把缩放压到 20% 出头，23 张图全挤在屏幕里谁也看不清。
+ */
+function fitZoom(index = state.focusBlock) {
   state.userAdjusted = false;
   const layer = $('#zoomLayer');
   const svgs = Array.from(layer.querySelectorAll('svg'));
   if (!svgs.length) return;
   const box = $('#preview').getBoundingClientRect();
-  let maxW = 0;
-  let maxH = 0;
-  svgs.forEach((s) => {
-    const vb = s.viewBox && s.viewBox.baseVal;
-    const w = vb && vb.width ? vb.width : (s.getBoundingClientRect().width / state.view.k);
-    const h = vb && vb.height ? vb.height : (s.getBoundingClientRect().height / state.view.k);
-    maxW = Math.max(maxW, w);
-    maxH = Math.max(maxH, h);
-  });
-  if (!maxW || !maxH) return;
+  const idx = Math.max(0, Math.min(index, svgs.length - 1));
+  const target = svgs[idx];
+  const vb = target.viewBox && target.viewBox.baseVal;
+  const w = vb && vb.width ? vb.width : (target.getBoundingClientRect().width / state.view.k);
+  const h = vb && vb.height ? vb.height : (target.getBoundingClientRect().height / state.view.k);
+  if (!w || !h) return;
   const pad = 40;
-  const k = Math.min((box.width - pad) / maxW, (box.height - pad) / maxH, 1.5);
-  state.view.k = Math.max(0.05, k);
-  state.view.x = (box.width - maxW * state.view.k) / 2;
-  state.view.y = (box.height - maxH * state.view.k) / 2;
+  const k = Math.max(0.05, Math.min((box.width - pad) / w, (box.height - pad) / h, 1.5));
+  // 把目标图居中（多图时按它在图层里的偏移算）
+  const off = svgContentOffset(target);
+  state.view.k = k;
+  state.view.x = box.width / 2 - (off.x + w / 2) * k;
+  state.view.y = box.height / 2 - (off.y + h / 2) * k;
   applyTransform();
+}
+
+/** 定位到第 i 张图：按该图自身尺寸适应并居中 */
+function focusBlock(i) {
+  const layer = $('#zoomLayer');
+  const svgs = Array.from(layer.querySelectorAll('svg'));
+  if (!svgs.length) return;
+  const idx = Math.max(0, Math.min(i, svgs.length - 1));
+  const s = svgs[idx];
+  state.focusBlock = idx;
+  const box = $('#preview').getBoundingClientRect();
+  const vb = s.viewBox && s.viewBox.baseVal;
+  const w = vb && vb.width ? vb.width : (s.getBoundingClientRect().width / state.view.k);
+  const h = vb && vb.height ? vb.height : (s.getBoundingClientRect().height / state.view.k);
+  if (!w || !h) return;
+  const pad = 40;
+  const k = Math.max(0.05, Math.min((box.width - pad) / w, (box.height - pad) / h, 1.5));
+  const off = svgContentOffset(s);
+  state.userAdjusted = false;
+  state.view.k = k;
+  state.view.x = box.width / 2 - (off.x + w / 2) * k;
+  state.view.y = box.height / 2 - (off.y + h / 2) * k;
+  applyTransform();
+  Array.from($('#blockNav').querySelectorAll('button')).forEach((x) => x.classList.remove('active'));
+  const btn = $(`#blockNav button[data-block="${idx}"]`);
+  if (btn) btn.classList.add('active');
 }
 
 function resetZoom() {
@@ -939,6 +990,46 @@ function loadLocal() {
 }
 
 // ---------------------------------------------------------------------------
+// 界面布局偏好（工具栏 / 图块栏 / 侧栏 的折叠状态）
+// ---------------------------------------------------------------------------
+const UI_KEY = 'mermaid-local-ui-v1';
+
+function saveUiPrefs() {
+  try {
+    localStorage.setItem(UI_KEY, JSON.stringify({
+      bar: state.barCollapsed,
+      block: state.blockCollapsed,
+      side: state.sideCollapsed,
+    }));
+  } catch { /* 存不了就算了，不影响使用 */ }
+}
+
+function applyUiPrefs() {
+  const topbar = $('#topbar');
+  const blockBar = $('#blockBar');
+  const side = $('#side');
+  topbar.classList.toggle('collapsed', state.barCollapsed);
+  $('#btnBarToggle').setAttribute('aria-expanded', String(!state.barCollapsed));
+  blockBar.classList.toggle('collapsed', state.blockCollapsed);
+  $('#btnBlockToggle').setAttribute('aria-expanded', String(!state.blockCollapsed));
+  side.classList.toggle('collapsed', state.sideCollapsed);
+  $('#btnSideToggle').setAttribute('aria-expanded', String(!state.sideCollapsed));
+  $('#btnSideToggle').textContent = state.sideCollapsed ? '‹' : '›';
+}
+
+function loadUiPrefs() {
+  try {
+    const raw = localStorage.getItem(UI_KEY);
+    if (raw) {
+      const p = JSON.parse(raw) || {};
+      state.barCollapsed = !!p.bar;
+      state.blockCollapsed = !!p.block;
+      state.sideCollapsed = !!p.side;
+    }
+  } catch { /* 用默认值 */ }
+}
+
+// ---------------------------------------------------------------------------
 // 设置面板
 // ---------------------------------------------------------------------------
 const PRESETS = {
@@ -1182,6 +1273,25 @@ function bindUI() {
   $('#lbSvg').addEventListener('click', exportSvg);
   $('#btnTheme').addEventListener('click', () => setUiLight(!state.uiLight));
 
+  // --- 布局折叠：工具栏 / 图块栏 / 侧栏 ---
+  $('#btnBarToggle').addEventListener('click', () => {
+    state.barCollapsed = !state.barCollapsed;
+    applyUiPrefs();
+    saveUiPrefs();
+    fitZoom();
+  });
+  $('#btnBlockToggle').addEventListener('click', () => {
+    state.blockCollapsed = !state.blockCollapsed;
+    applyUiPrefs();
+    saveUiPrefs();
+  });
+  $('#btnSideToggle').addEventListener('click', () => {
+    state.sideCollapsed = !state.sideCollapsed;
+    applyUiPrefs();
+    saveUiPrefs();
+    fitZoom();
+  });
+
   $('#autoFix').addEventListener('change', (e) => {
     state.autoFix = e.target.checked;
     $('#stAuto').textContent = `自动兼容：${state.autoFix ? '开' : '关'}`;
@@ -1316,6 +1426,8 @@ function boot() {
   const saved = loadLocal();
   const initial = saved && typeof saved.code === 'string' ? saved.code : SAMPLES[0].code;
 
+  loadUiPrefs();
+
   initMermaid();
 
   editor = createEditor(initial);
@@ -1332,6 +1444,7 @@ function boot() {
   editor.dispatch({ effects: highlightStyle.reconfigure(syntaxHighlighting(state.uiLight ? lightHL : darkHL)) });
 
   bindUI();
+  applyUiPrefs();
   initPanZoom();
   initSplitters();
   renderSampleList('');

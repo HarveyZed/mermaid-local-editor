@@ -235,6 +235,95 @@ flowchart TD
         nav_visible = page.eval_on_selector("#blockNav", "el => !el.classList.contains('hidden')")
         check("Markdown 多图：渲染出 2 张图", n_svg == 2, f"svg={n_svg} nav={nav_visible}")
 
+        # --- 16b. 图块导航条不溢出（回归：图块多时曾把侧栏标签压住）---
+        many = "# 压力\n\n" + "\n\n".join(
+            "```mermaid\nflowchart TD\n  A[%d] --> B[%d]\n```" % (i, i + 1) for i in range(23))
+        page.evaluate("(md) => window.__lme.setCode(md)", many)
+        page.wait_for_timeout(2500)
+        layout = page.evaluate("""() => {
+          const nav = document.querySelector('#blockNav');
+          const bar = document.querySelector('#blockBar');
+          const tabs = document.querySelector('.tabs');
+          const pane = document.querySelector('#panePreview');
+          const btns = Array.from(nav.querySelectorAll('button'));
+          const tr = tabs.getBoundingClientRect();
+          const pr = pane.getBoundingClientRect();
+          let overlap = 0, outside = 0;
+          btns.forEach(el => {
+            const r = el.getBoundingClientRect();
+            if (r.right > tr.left && r.left < tr.right && r.bottom > tr.top && r.top < tr.bottom) overlap++;
+            if (r.right > pr.right + 1) outside++;
+          });
+          const rows = new Set(btns.map(el => Math.round(el.getBoundingClientRect().top))).size;
+          return { n: btns.length, overlap, outside, rows,
+                   barShown: !bar.classList.contains('hidden'),
+                   docOverflow: document.documentElement.scrollWidth > document.documentElement.clientWidth + 1 };
+        }""")
+        check("23 个图块：导航条全部渲染出来", layout["n"] == 23, layout)
+        check("23 个图块：导航条不压住侧栏标签", layout["overlap"] == 0, f"压住 {layout['overlap']} 个")
+        check("23 个图块：导航条不超出预览区", layout["outside"] == 0, f"超出 {layout['outside']} 个")
+        check("23 个图块：导航条自动换行成多行", layout["rows"] >= 1 and layout["barShown"], layout)
+        check("页面不出现横向滚动条", not layout["docOverflow"], layout)
+
+        # 点图块导航 → 定位到该图并高亮
+        page.click("#blockNav button[data-block='14']")
+        page.wait_for_timeout(700)
+        focus = page.evaluate("""() => {
+          const s = document.querySelectorAll('#zoomLayer svg')[14];
+          const p = document.querySelector('#preview').getBoundingClientRect();
+          const r = s.getBoundingClientRect();
+          const a = document.querySelector('#blockNav button.active');
+          return { inView: r.top >= p.top - 2 && r.bottom <= p.bottom + 2,
+                   active: a ? a.textContent : 'none',
+                   zoom: document.querySelector('#zoomLabel').textContent };
+        }""")
+        check("点图块导航：定位到该图并高亮", focus["inView"] and focus["active"] == "#15", focus)
+
+        # --- 16c. 折叠：工具栏 / 图块栏 / 侧栏 ---
+        page.click("#btnBlockToggle")
+        page.wait_for_timeout(400)
+        collapsed = page.evaluate("""() => ({
+          navHidden: getComputedStyle(document.querySelector('#blockNav')).display === 'none',
+          barCollapsed: document.querySelector('#blockBar').classList.contains('collapsed'),
+        })""")
+        check("图块栏可折叠", collapsed["navHidden"] and collapsed["barCollapsed"], collapsed)
+        page.click("#btnBlockToggle")
+        page.wait_for_timeout(300)
+
+        page.click("#btnBarToggle")
+        page.wait_for_timeout(400)
+        bar = page.evaluate("""() => ({
+          collapsed: document.querySelector('#topbar').classList.contains('collapsed'),
+          actionsHidden: getComputedStyle(document.querySelector('.topbar-actions')).display === 'none',
+          brandVisible: !!document.querySelector('.brand').offsetParent,
+        })""")
+        check("顶栏可折叠（只留品牌条）",
+              bar["collapsed"] and bar["actionsHidden"] and bar["brandVisible"], bar)
+        page.click("#btnBarToggle")
+        page.wait_for_timeout(300)
+
+        page.click("#btnSideToggle")
+        page.wait_for_timeout(400)
+        side = page.evaluate("""() => ({
+          collapsed: document.querySelector('#side').classList.contains('collapsed'),
+          width: Math.round(document.querySelector('#side').getBoundingClientRect().width),
+          previewW: Math.round(document.querySelector('#panePreview').getBoundingClientRect().width),
+        })""")
+        check("侧栏可收起成窄条（预览区变宽）",
+              side["collapsed"] and side["width"] <= 40 and side["previewW"] > 400, side)
+        page.click("#btnSideToggle")
+        page.wait_for_timeout(300)
+
+        # 折叠状态要能持久化
+        page.click("#btnSideToggle")
+        page.wait_for_timeout(400)
+        page.reload()
+        page.wait_for_timeout(2000)
+        persisted = page.evaluate("() => document.querySelector('#side').classList.contains('collapsed')")
+        check("侧栏折叠状态刷新后保留", persisted, persisted)
+        page.click("#btnSideToggle")
+        page.wait_for_timeout(300)
+
         # --- 17. 分享链接往返（重载后还原） ---
         page.evaluate("(c) => window.__lme.setCode(c)", "flowchart LR\n  Q1[往返测试] --> Q2[OK]")
         page.wait_for_timeout(900)

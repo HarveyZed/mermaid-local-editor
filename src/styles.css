@@ -51,11 +51,12 @@ button, input, select, textarea { font-family: inherit; font-size: inherit; colo
 
 /* ---------------- 顶栏 ---------------- */
 .topbar {
-  display: flex; align-items: center; gap: 14px;
-  height: 50px; padding: 0 12px; flex: 0 0 auto;
+  display: flex; align-items: center; gap: 12px;
+  min-height: 50px; padding: 6px 12px; flex: 0 0 auto;
   background: var(--bg-2); border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;                 /* 窗口不够宽时按钮组自动换行，不再横向溢出 */
 }
-.brand { display: flex; align-items: center; gap: 8px; font-weight: 700; letter-spacing: .2px; color: var(--fg); }
+.brand { display: flex; align-items: center; gap: 8px; font-weight: 700; letter-spacing: .2px; color: var(--fg); flex: 0 0 auto; }
 .brand svg { color: var(--accent); }
 .brand span { font-size: 15px; }
 .badge {
@@ -69,15 +70,22 @@ button, input, select, textarea { font-family: inherit; font-size: inherit; colo
 .badge-err  { color: var(--danger); border-color: rgba(255, 107, 107, .4); background: rgba(255, 107, 107, .1); }
 .badge-hidden { display: none; }
 
-.topbar-file { display: flex; align-items: center; gap: 8px; flex: 1 1 auto; min-width: 0; }
+.topbar-file { display: flex; align-items: center; gap: 8px; flex: 1 1 180px; min-width: 0; }
 .file-name {
   background: transparent; border: 1px solid transparent; border-radius: 7px;
-  padding: 5px 8px; width: 200px; min-width: 90px; color: var(--fg);
+  padding: 5px 8px; width: 100%; max-width: 240px; min-width: 70px; color: var(--fg);
 }
 .file-name:hover { border-color: var(--border); }
 .file-name:focus { outline: none; border-color: var(--accent); background: var(--bg-3); }
 
-.topbar-actions { display: flex; align-items: center; gap: 6px; }
+.topbar-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.topbar-toggle { flex: 0 0 auto; margin-left: auto; font-size: 12px; line-height: 1; }
+/* 收起后只留品牌 + 展开按钮，把纵向空间全还给编辑区 */
+.topbar.collapsed { min-height: 0; height: 34px; padding-top: 0; padding-bottom: 0; overflow: hidden; flex-wrap: nowrap; }
+.topbar.collapsed .topbar-file,
+.topbar.collapsed .topbar-actions { display: none; }
+.topbar.collapsed .topbar-toggle { margin-left: auto; transform: rotate(180deg); }
+
 .btn {
   background: var(--bg-3); border: 1px solid var(--border); color: var(--fg);
   padding: 6px 11px; border-radius: 8px; cursor: pointer; white-space: nowrap;
@@ -93,7 +101,7 @@ button, input, select, textarea { font-family: inherit; font-size: inherit; colo
 /* ---------------- 修复条 ---------------- */
 .fixbar {
   flex: 0 0 auto; display: flex; align-items: center; gap: 12px;
-  padding: 8px 14px; font-size: 12.5px;
+  padding: 8px 14px; font-size: 12.5px; flex-wrap: wrap;
   background: rgba(240, 180, 41, .12); color: var(--fg);
   border-bottom: 1px solid rgba(240, 180, 41, .3);
 }
@@ -105,28 +113,58 @@ button, input, select, textarea { font-family: inherit; font-size: inherit; colo
 .main { flex: 1 1 auto; display: flex; min-height: 0; }
 
 .pane { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
-.pane-editor { flex: 0 0 44%; }
+.pane-editor { flex: 0 0 42%; }
 .pane-preview { flex: 1 1 auto; position: relative; }
 .pane-head {
   flex: 0 0 auto; display: flex; align-items: center; gap: 10px;
-  height: 36px; padding: 0 10px;
+  min-height: 36px; padding: 4px 10px;
   background: var(--bg-2); border-bottom: 1px solid var(--border-soft);
+  flex-wrap: wrap;
 }
 .pane-title { font-size: 12px; font-weight: 700; letter-spacing: .6px; color: var(--fg-mute); text-transform: uppercase; }
-.pane-tools { margin-left: auto; display: flex; align-items: center; gap: 6px; }
+.pane-tools { margin-left: auto; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; min-width: 0; }
 .mini {
   background: transparent; border: 1px solid var(--border); color: var(--fg-dim);
   border-radius: 6px; padding: 3px 8px; cursor: pointer; font-size: 12px;
 }
 .mini:hover { background: var(--bg-hover); color: var(--fg); border-color: var(--accent); }
 .zoom-label { font-size: 11.5px; color: var(--fg-mute); min-width: 40px; text-align: center; font-variant-numeric: tabular-nums; }
-.block-nav { display: flex; gap: 4px; }
+
+/* 图块导航：独立成一行，挤不下自动换行，可折叠 */
+.blockbar {
+  flex: 0 0 auto; display: flex; align-items: flex-start; gap: 8px;
+  padding: 6px 10px; background: var(--bg-2);
+  border-bottom: 1px solid var(--border-soft);
+}
+.block-toggle { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+.block-toggle .caret { font-size: 9px; display: inline-block; transition: transform .15s; }
+.blockbar.collapsed .block-toggle .caret { transform: rotate(-90deg); }
+.blockbar.collapsed .block-nav { display: none; }
+.block-nav {
+  display: flex; flex-wrap: wrap; gap: 4px;
+  flex: 1 1 auto; min-width: 0;
+  max-height: 84px; overflow-y: auto;   /* 最多约 3 行，再多就滚动 */
+  scrollbar-width: thin;
+}
 .block-nav button { font-size: 11px; padding: 2px 7px; }
+.block-nav button.active { border-color: var(--accent); color: var(--fg); background: rgba(76, 141, 255, .14); }
 
 .splitter { flex: 0 0 5px; background: transparent; cursor: col-resize; position: relative; }
 .splitter:hover, .splitter.dragging { background: var(--accent); }
 .splitter-v { flex: 0 0 5px; }
-.side { flex: 0 0 320px; background: var(--bg-2); border-left: 1px solid var(--border); display: flex; flex-direction: column; min-width: 0; }
+.side { flex: 0 0 300px; background: var(--bg-2); border-left: 1px solid var(--border); display: flex; flex-direction: column; min-width: 0; }
+/* 侧栏收起成窄条 */
+.side.collapsed { flex: 0 0 34px; }
+.side.collapsed .tab,
+.side.collapsed .tab-body { display: none; }
+.side.collapsed .tabs { justify-content: center; border-bottom: none; }
+.side-toggle {
+  flex: 0 0 auto; background: transparent; border: none; border-left: 1px solid var(--border);
+  color: var(--fg-mute); cursor: pointer; font-size: 15px; line-height: 1;
+  width: 26px; display: flex; align-items: center; justify-content: center;
+}
+.side-toggle:hover { color: var(--accent); background: var(--bg-hover); }
+.side.collapsed .side-toggle { border-left: none; }
 
 /* ---------------- 编辑器 ---------------- */
 .editor-host { flex: 1 1 auto; min-height: 0; overflow: hidden; }
@@ -309,7 +347,20 @@ kbd {
 
 .hidden { display: none !important; }
 
+/* ---------------- 窄屏适配 ---------------- */
+@media (max-width: 1180px) {
+  .side { flex-basis: 264px; }
+  .topbar { gap: 8px; }
+  .btn { padding: 6px 9px; }
+}
 @media (max-width: 900px) {
-  .topbar { flex-wrap: wrap; height: auto; padding: 8px; }
-  .side { flex-basis: 260px; }
+  .topbar { padding: 8px 10px; }
+  .topbar-file { flex: 1 1 100%; order: 3; }   /* 文件名独占一行，按钮组不再被挤扁 */
+  .side { flex-basis: 240px; }
+  .statusbar #stType, .statusbar #stAuto { display: none; }
+  .block-nav { max-height: 68px; }
+}
+@media (max-width: 680px) {
+  .side { flex-basis: 200px; }
+  .statusbar { gap: 8px; }
 }

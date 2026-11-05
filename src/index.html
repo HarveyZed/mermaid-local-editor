@@ -10,7 +10,7 @@
 <div id="app" class="app">
 
   <!-- ============ 顶栏 ============ -->
-  <header class="topbar">
+  <header class="topbar" id="topbar">
     <div class="brand">
       <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
         <path d="M4 4h7v7H4zM13 4h7v4h-7zM13 10h7v10h-7zM4 13h7v7H4z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
@@ -39,6 +39,8 @@
       <button id="btnFull"    class="btn" title="全屏预览 (Ctrl+Shift+F)">全屏</button>
       <button id="btnTheme"   class="btn btn-icon" title="切换深/浅色界面">◐</button>
     </div>
+
+    <button id="btnBarToggle" class="btn btn-icon topbar-toggle" title="收起 / 展开工具栏" aria-expanded="true">⌃</button>
     <input type="file" id="fileInput" accept=".mmd,.mermaid,.md,.txt,text/plain,text/markdown" hidden>
   </header>
 
@@ -75,8 +77,14 @@
           <button class="mini" id="btnZoomIn" title="放大">＋</button>
           <button class="mini" id="btnZoomFit" title="适应窗口 (Ctrl+0)">适应</button>
           <button class="mini" id="btnZoomReset" title="重置 (Ctrl+1)">重置</button>
-          <span id="blockNav" class="block-nav hidden"></span>
         </div>
+      </div>
+      <!-- 图块导航：独立成一行，挤不下自动换行，可折叠 -->
+      <div id="blockBar" class="blockbar hidden">
+        <button id="btnBlockToggle" class="mini block-toggle" title="折叠 / 展开图块列表" aria-expanded="true">
+          <span id="blockCount">0</span> 图块<span class="caret">▾</span>
+        </button>
+        <div id="blockNav" class="block-nav"></div>
       </div>
       <div id="preview" class="preview">
         <div id="zoomLayer" class="zoom-layer"></div>
@@ -92,6 +100,7 @@
         <button class="tab" data-tab="compat">兼容<span id="compatCount" class="dot hidden"></span></button>
         <button class="tab" data-tab="samples">样例</button>
         <button class="tab" data-tab="help">帮助</button>
+        <button id="btnSideToggle" class="side-toggle" title="收起 / 展开侧栏" aria-expanded="true">›</button>
       </div>
 
       <div class="tab-body active" data-panel="settings">
