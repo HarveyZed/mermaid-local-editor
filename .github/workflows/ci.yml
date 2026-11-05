@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-test:
+    name: 构建 + 测试
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 构建单文件产物
+        run: npm run build
+
+      - name: 单元测试（兼容层）
+        run: node test/compat.test.mjs
+
+      - name: 产物完整性测试（离线 / 无外链）
+        run: node test/artifact.test.mjs
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 安装 Playwright 与 Chromium
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install playwright
+          python -m playwright install --with-deps chromium
+
+      - name: 端到端测试（真实浏览器 · 真实下载链路）
+        run: python test/e2e.py
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: mermaid-local-editor-html
+          path: output/mermaid-local-editor.html
+          if-no-files-found: error
+
+      # 打 tag 时把构建产物挂到 Release 上，省掉手工上传
+      - name: 挂到 Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: output/mermaid-local-editor.html
+          name: mermaid-local-editor.html
+          fail_on_unmatched_files: true
+          # 附件重名时先删掉旧的，避免 "already_exists" 直接失败
+          overwrite_files: true
+
