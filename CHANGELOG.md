@@ -1,5 +1,54 @@
 # Changelog
 
+## v1.0.2 — 批量导出 SVG 崩溃修复
+
+用户实测反馈：导入含多个 mermaid 代码块的 `.md` 后，批量导出 SVG 报
+`TypeError: i.cloneNode is not a function`。查下来是**两个**叠在一起的问题。
+
+### 1. `serializeSvg` 把字符串当 DOM 节点用（直接崩）
+
+mermaid v12 的 `render()` 返回的是**字符串**，不是 DOM 元素，而 `serializeSvg()`
+无条件对它调 `svg.cloneNode(true)` → 字符串上没有这个方法 → 直接抛错。
+
+- 影响面：**「导出 SVG」按钮和「复制 SVG」两个功能全废**（不只是批量，单图也一样崩）。
+- 根因能溜过去，是因为测试只调了 `window.__lme.exportSvgText()`——那条路径返回的是
+  原始字符串，绕过了 `serializeSvg`。**真实的下载链路从来没被测过。**
+- 修复：`serializeSvg()` 现在字符串和 DOM 元素都兼容（字符串走 DOMParser 解析后再序列化）。
+
+### 2. `htmlLabels:false` 传不到 markdown 的图块（导出的 SVG 带 foreignObject）
+
+`renderForExport()` 原本是「读文档级 frontmatter → 把配置写回文档顶部 → 抽图块」。
+问题在于 **markdown 里 `extractBlocks` 只取 ```mermaid 围栏内的内容，文档顶部的
+frontmatter 不在任何一个围栏里，直接被丢掉** —— 于是每个图块都没拿到 `htmlLabels:false`。
+
+后果：
+- 导出的 SVG 带 `foreignObject`，文字依赖宿主 HTML/CSS，单独打开不完整；
+- **PNG 导出的画布被污染**，`canvas.toBlob()` 抛 `SecurityError: Tainted canvases may not be exported`，
+  整个导出流程直接失败。
+
+修复：配置**逐块重新套用**——文档级 `config` 作默认，块内自带 frontmatter 优先，
+`htmlLabels:false` 强制关闭。预览渲染路径也一并统一（之前文档顶部的 `theme` 对
+markdown 图块也是失效的，现在生效了）。
+
+### 顺带
+
+- 移除死代码 `currentSvgElements()`（无引用，且它指向的是一条已经不存在的 DOM 元素路径）。
+- `exportSvgText()` 原本用 `'\n'` 拼接多个 SVG 根节点——多个 `<svg>` 拼一份不是合法 XML。
+  改为返回第一张图，并新增 `exportSvgDocs()` 返回每张图独立的合法 XML。
+
+### 测试
+
+端到端测试 26 → **33** 项。新增的 7 项**点真实按钮、接真实下载文件**，而不是调内部 API：
+
+- 批量导出 SVG 不报错、产出多个文件、文件名按序号区分
+- 每个导出文件都是合法单根 XML、带 XML 声明与 `xmlns:xlink`
+- 导出的 SVG 不含 `foreignObject`
+- markdown 多块导出 PNG 不被画布污染
+- 复制 SVG 写入剪贴板的是合法单根 SVG
+
+**先验证测试确实能抓住 bug**：把源码临时换回修复前的版本重跑，
+新测试如期报红（`导出失败：TypeError: i.cloneNode is not a function`），再恢复修复版转绿。
+
 ## v1.0.1 — 审计修复
 
 一轮独立对抗性审计（由另一个 agent 专门找本产物的毛病）发现 9 个缺陷，本次全部修复。

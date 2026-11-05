@@ -90,6 +90,26 @@ function writeConfig(code, config) {
   return `---\n${yamlText}\n---\n${body}`;
 }
 
+/**
+ * 把配置套到某个图块上。
+ *
+ * mermaid 的 frontmatter 必须**紧贴图源码前面**，而 markdown 里 extractBlocks
+ * 只取 ```mermaid 围栏里的内容——文档顶部的 frontmatter 会整体被丢掉，
+ * 导致「文档级 config」和「导出用的 htmlLabels:false」都传不到图块上
+ * （症状：导出的 SVG 带 foreignObject，PNG 画布被污染报 SecurityError）。
+ *
+ * 规则：文档级 config 作默认，块内自带 frontmatter 的 config 优先。
+ */
+function applyBlockConfig(blockCode, mergedCfg) {
+  if (!mergedCfg || !Object.keys(mergedCfg).length) return blockCode;
+  return writeConfig(blockCode, mergedCfg);
+}
+
+/** 文档级 config（markdown 顶部的 frontmatter） */
+function docConfigOf(code) {
+  return readConfig(code);
+}
+
 // ---------------------------------------------------------------------------
 // 编辑器
 // ---------------------------------------------------------------------------
@@ -306,6 +326,7 @@ async function renderNow(force = false, analysisOnly = false) {
 
   const t0 = performance.now();
   const blocks = extractBlocks(effective);
+  const docCfg = docConfigOf(effective);
   const layer = $('#zoomLayer');
   const msg = $('#previewMsg');
   msg.classList.remove('show');
@@ -323,7 +344,8 @@ async function renderNow(force = false, analysisOnly = false) {
   try {
     const rendered = [];
     for (let i = 0; i < blocks.length; i += 1) {
-      const { svg } = await mermaid.render(`lme${renderSeq++}`, blocks[i].code);
+      const blockCode = applyBlockConfig(blocks[i].code, { ...docCfg, ...readConfig(blocks[i].code) });
+      const { svg } = await mermaid.render(`lme${renderSeq++}`, blockCode);
       const svgErr = detectSvgError(svg);
       if (svgErr) {
         showError(new Error(svgErr.message), svgErr);
@@ -679,12 +701,22 @@ function initPanZoom() {
 // ---------------------------------------------------------------------------
 // 导出
 // ---------------------------------------------------------------------------
-function currentSvgElements() {
-  return Array.from($('#zoomLayer').querySelectorAll('svg'));
-}
 
+/**
+ * 把 mermaid 渲染结果序列化成独立 SVG 文本。
+ * mermaid v12 的 render() 返回的是 **字符串**（不是 DOM 节点），
+ * 这里两种都兼容，避免调用方把字符串当元素用。
+ */
 function serializeSvg(svg) {
-  const clone = svg.cloneNode(true);
+  let el = svg;
+  if (typeof svg === 'string') {
+    const doc = new DOMParser().parseFromString(svg, 'image/svg+xml');
+    el = doc.documentElement;
+    if (!el || el.nodeName === 'parsererror' || doc.querySelector('parsererror')) {
+      throw new Error('SVG 解析失败');
+    }
+  }
+  const clone = el.cloneNode(true);
   clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
   clone.setAttribute('xmlns:xlink', 'http://www.w3.org/1999/xlink');
   if (!clone.getAttribute('style')) clone.setAttribute('style', 'max-width: none;');
@@ -709,13 +741,18 @@ function baseName() {
 /** 为导出重渲染一版（htmlLabels=false，保证 PNG 里文字能画出来） */
 async function renderForExport() {
   const code = editor.state.doc.toString();
-  const cfg = readConfig(code);
-  const exportCfg = { ...cfg, htmlLabels: false };
-  const exportCode = writeConfig(code, exportCfg);
-  const blocks = extractBlocks(exportCode);
+  const docCfg = docConfigOf(code);
+  const blocks = extractBlocks(code);
   const out = [];
   for (let i = 0; i < blocks.length; i += 1) {
-    const { svg } = await mermaid.render(`exp${renderSeq++}`, blocks[i].code);
+    // 配置要逐块重新套上：markdown 顶部的 frontmatter 不在围栏内，
+    // 直接渲染图块会丢掉 htmlLabels:false（PNG 画布污染 / SVG 带 foreignObject）
+    const blockCode = applyBlockConfig(blocks[i].code, {
+      ...docCfg,
+      ...readConfig(blocks[i].code),
+      htmlLabels: false,
+    });
+    const { svg } = await mermaid.render(`exp${renderSeq++}`, blockCode);
     out.push(svg);
   }
   return out;
@@ -1316,7 +1353,15 @@ function boot() {
     render: () => renderNow(true),
     analyze: (code) => analyze(code),
     migrate: (code) => applyFixes(code),
-    exportSvgText: async () => (await renderForExport()).join('\n'),
+    exportSvgText: async () => {
+      const svgs = await renderForExport();
+      return svgs.length ? serializeSvg(svgs[0]) : '';
+    },
+    /** 批量导出用：返回每个图一份独立的、合法 XML 的 SVG 文本 */
+    exportSvgDocs: async () => {
+      const svgs = await renderForExport();
+      return svgs.map((s, i) => ({ name: `${baseName()}${svgs.length > 1 ? '-' + (i + 1) : ''}.svg`, text: serializeSvg(s) }));
+    },
     exportPngBlob: async (scale = 2) => {
       const svgs = await renderForExport();
       return rasterizeSvg(svgs[0], scale);

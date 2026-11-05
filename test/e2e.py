@@ -1,3 +1,4 @@
+import base64
 import json
 import pathlib
 import sys
@@ -96,6 +97,72 @@ flowchart TD
         check("导出 SVG 含文字节点(<text>)", "<text" in exported and "foreignObject" not in exported,
               f"len={len(exported)} text={'<text' in exported} foreignObject={'foreignObject' in exported}")
 
+        # --- 9b. 真实点击「导出 SVG」按钮，走完整下载链路 ---
+        # 回归缺陷：mermaid v12 的 render() 返回字符串，serializeSvg 却对它调 cloneNode，
+        # 导致「导出 SVG」/「复制 SVG」直接抛 TypeError。此处必须点真按钮 + 接真下载。
+        md_multi = (
+            "# 演示文档\n\n```mermaid\nflowchart TD\n  A[开始] --> B[结束]\n```\n\n"
+            "```mermaid\nsequenceDiagram\n  Alice->>Bob: 你好\n```\n"
+        )
+        page.evaluate("(c) => window.__lme.setCode(c)", md_multi)
+        page.wait_for_timeout(1600)
+
+        downloads = []
+        page.on("download", lambda d: downloads.append(d))
+        page.click("#btnSvg")
+        page.wait_for_timeout(3000)
+
+        toast_text = page.evaluate("() => document.querySelector('#toast')?.innerText || ''")
+        check("批量导出 SVG 未报错", "导出失败" not in toast_text, f"toast={toast_text!r}")
+
+        import xml.etree.ElementTree as ET
+        docs = []
+        for d in downloads:
+            try:
+                docs.append((d.suggested_filename, pathlib.Path(d.path()).read_text(encoding="utf-8")))
+            except Exception as exc:  # 下载还没落盘
+                docs.append((d.suggested_filename, f"ERR:{exc}"))
+
+        check("批量导出产出了多个 SVG 文件", len(docs) >= 2, f"下载数={len(docs)} 名={[d[0] for d in docs]}")
+
+        bad_xml = []
+        for name, text in docs:
+            try:
+                root = ET.fromstring(text)
+                if root.tag.split("}")[-1] != "svg":
+                    bad_xml.append(f"{name}: 根节点是 {root.tag}")
+            except Exception as exc:
+                bad_xml.append(f"{name}: XML 解析失败 {exc}")
+        check("每个导出的 SVG 都是合法单根 XML", not bad_xml, bad_xml[:3])
+
+        check("导出的 SVG 带 XML 声明与 xmlns:xlink",
+              all(("<?xml" in t and 'xmlns:xlink' in t) for _, t in docs),
+              [n for n, t in docs if "<?xml" not in t or "xmlns:xlink" not in t][:3])
+
+        check("导出文件名按序号区分", len({n for n, _ in docs}) == len(docs), [n for n, _ in docs])
+
+        # 回归缺陷：markdown 多块时 htmlLabels:false 没传到图块
+        # → 导出的 SVG 带 foreignObject → PNG 画布被污染 → toBlob 抛 SecurityError
+        check("导出的 SVG 不含 foreignObject（htmlLabels:false 已传到图块）",
+              all("foreignObject" not in t for _, t in docs),
+              [n for n, t in docs if "foreignObject" in t][:3])
+
+        png_ok, png_detail = True, ""
+        try:
+            png_b64_md = page.evaluate("""async () => {
+                const blob = await window.__lme.exportPngBlob(2);
+                const buf = new Uint8Array(await blob.arrayBuffer());
+                let bin = '';
+                for (let i = 0; i < buf.length; i++) bin += String.fromCharCode(buf[i]);
+                return btoa(bin);
+            }""")
+            png_bytes_md = base64.b64decode(png_b64_md)
+            png_ok = png_bytes_md[:8] == b"\x89PNG\r\n\x1a\n" and len(png_bytes_md) > 2000
+            png_detail = f"size={len(png_bytes_md)}"
+        except Exception as exc:
+            png_ok, png_detail = False, str(exc)[:220]
+        check("markdown 多块导出 PNG 不被画布污染", png_ok, png_detail)
+
         svg_text = page.evaluate("""() => {
             const svg = document.querySelector('#zoomLayer svg');
             return svg ? svg.outerHTML : '';
@@ -103,7 +170,6 @@ flowchart TD
         check("预览 SVG 已生成", len(svg_text) > 500, len(svg_text))
 
         # 导出 PNG 真实可解码
-        import base64
         png_b64 = page.evaluate("""async () => {
             const blob = await window.__lme.exportPngBlob(2);
             const buf = new Uint8Array(await blob.arrayBuffer());
