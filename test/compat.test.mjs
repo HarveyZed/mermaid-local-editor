@@ -257,6 +257,50 @@ t('init 迁移不能删错行（带 frontmatter 时行号偏移）', () => {
   assert.match(code, / A-->B/);
 });
 
+
+// --- 独立验证 agent 指出的回归用例 ----------------------------------
+t('D-4 注释里的同文本不会被误改（改错行）', () => {
+  const src = 'flowchart TD\n%%   A【x】 --> B\n  A【x】 --> B';
+  const { code } = applyFixes(src);
+  assert.match(code, /%%\s+A【x】 --> B/, '注释行不能被改');
+  assert.match(code, /A\["x"\] --> B/, '真正的问题行必须被改');
+});
+t('D-8 补 end 插到 subgraph 后面而不是文档末尾', () => {
+  const src = 'flowchart TD\n  subgraph S\n    A --> B\n  C --> D';
+  const { code } = applyFixes(src);
+  const lines = code.split('\n');
+  const endIdx = lines.findIndex((l) => l.trim() === 'end');
+  assert.ok(endIdx > 0, '必须补出 end');
+  assert.ok(endIdx < lines.length - 1, 'end 不能落在文档末尾');
+  assert.match(lines[endIdx + 1] || '', /C --> D/, 'end 应插在 S 的内容之后');
+});
+t('D-6 时序图的 alt/end 不被误报成多出 end', () => {
+  const a = analyze('sequenceDiagram\n  alt first\n    A->>B: x\n  end');
+  assert.equal(a.issues.filter((i) => i.rule === 'extra-end').length, 0);
+});
+t('D-6 flowchart 仍然会检出多余的 end', () => {
+  const a = analyze('flowchart TD\n  A-->B\n  end');
+  assert.ok(a.issues.some((i) => i.rule === 'extra-end'));
+});
+t('D-7 首行是 %% 注释时 sankey 中文仍能检出', () => {
+  const a = analyze('%% 注释\nsankey-beta\n\n开始,结束[1]');
+  assert.ok(a.issues.some((i) => i.rule === 'sankey-cjk'));
+});
+t('R-5 markdown 散文不被兼容层改写', () => {
+  const md = '# 说明【重要】\n\n```mermaid\nflowchart TD\n  A-->B\n```\n';
+  const { code } = applyFixes(md);
+  assert.match(code, /# 说明【重要】/, '散文标题不能被改');
+});
+t('markdown 里 mermaid 块内的问题仍会被检出', () => {
+  const md = '# 标题\n\n```mermaid\nflowchart TD\n  A【x】 --> B\n```\n';
+  const a = analyze(md);
+  assert.ok(a.issues.some((i) => i.rule === 'fullwidth-punct'));
+});
+t('D-3 markdown 单图块的类型也能识别', () => {
+  const md = '# 标题\n\n```mermaid\nsequenceDiagram\n  A->>B: x\n```\n';
+  assert.equal(detectType(md).type, 'sequence');
+});
+
 console.log(`\ncompat tests: ${pass} passed, ${fails.length} failed`);
 for (const [n, m] of fails) console.log('  FAIL', n, '::', m);
 process.exit(fails.length ? 1 : 0);

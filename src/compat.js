@@ -85,17 +85,20 @@ export const KEYWORD_ALIASES = {
 // ---------------------------------------------------------------------------
 
 /**
- * 把源码切成 { frontmatter, body, offset }。
+ * 把源码切成 { frontmatter, body, bodyStart, bodyLineOffset }。
  * frontmatter 为空时 frontmatter = ''，body 为整段源码。
+ * bodyLineOffset = frontmatter 占掉的行数，用于把 body 内的行号换算回整篇源码的行号。
  */
 export function splitFrontmatter(src) {
   const text = src.replace(/^\uFEFF/, '');
   const m = /^\s*---\r?\n([\s\S]*?)\r?\n---\r?\n?/.exec(text);
-  if (!m) return { frontmatter: '', body: text, bodyStart: 0 };
+  if (!m) return { frontmatter: '', body: text, bodyStart: 0, bodyLineOffset: 0 };
+  const consumed = m[0];
   return {
     frontmatter: m[1],
-    body: text.slice(m[0].length),
-    bodyStart: m[0].length,
+    body: text.slice(consumed.length),
+    bodyStart: consumed.length,
+    bodyLineOffset: consumed.split(/\r?\n/).length - 1,
   };
 }
 
@@ -133,6 +136,7 @@ function ruleDefaultRenderer(src) {
     const layout = value === 'elk' ? 'elk' : 'dagre';
     out.push({
       line: i + 1,
+      lineIndex: i,
       rule: 'default-renderer',
       severity: 'error',
       auto: true,
@@ -228,13 +232,14 @@ export function migrateInitDirective(src) {
  */
 function ruleInitDirective(src) {
   const out = [];
-  const { body } = splitFrontmatter(src);
+  const { body, bodyLineOffset } = splitFrontmatter(src);
   const lines = toLines(body);
   lines.forEach((line, i) => {
     const m = /^\s*%%\{\s*init\s*:\s*(.+?)\s*\}%%\s*$/.exec(line);
     if (!m) return;
     out.push({
-      line: i + 1,
+      line: bodyLineOffset + i + 1,
+      lineIndex: bodyLineOffset + i,
       rule: 'init-directive',
       severity: 'info',
       auto: false,
@@ -252,7 +257,7 @@ function ruleInitDirective(src) {
  */
 function ruleKeyword(src) {
   const out = [];
-  const { body } = splitFrontmatter(src);
+  const { body, bodyLineOffset } = splitFrontmatter(src);
   const first = firstMeaningfulLine(body);
   if (!first) return out;
   const line = first.text;
@@ -264,7 +269,8 @@ function ruleKeyword(src) {
   const alias = KEYWORD_ALIASES[kw];
   if (!alias) {
     out.push({
-      line: 0,
+      line: bodyLineOffset + first.index + 1,
+      lineIndex: bodyLineOffset + first.index,
       rule: 'unknown-keyword',
       severity: 'error',
       auto: false,
@@ -275,7 +281,8 @@ function ruleKeyword(src) {
     return out;
   }
   out.push({
-    line: 0,
+    line: bodyLineOffset + first.index + 1,
+    lineIndex: bodyLineOffset + first.index,
     rule: 'keyword-alias',
     severity: 'error',
     auto: true,
@@ -335,6 +342,7 @@ function ruleFullwidthPunct(src) {
     if (after !== line) {
       out.push({
         line: i + 1,
+        lineIndex: i,
         rule: 'fullwidth-punct',
         severity: 'error',
         auto: true,
@@ -352,7 +360,12 @@ function ruleFullwidthPunct(src) {
  */
 function ruleSubgraphEnd(src) {
   const out = [];
-  const { body } = splitFrontmatter(src);
+  // 只有真正用 subgraph/end 语法的图类型才启用：
+  // 时序图的 alt/else/loop/opt/par 块同样用 end 收尾，统计它们会误报「多出 end」。
+  const type = detectType(src);
+  if (!type || !['flowchart', 'swimlane'].includes(type.type)) return out;
+
+  const { body, bodyLineOffset } = splitFrontmatter(src);
   const lines = body.split(/\r?\n/);
   let opens = 0;
   let closes = 0;
@@ -368,26 +381,39 @@ function ruleSubgraphEnd(src) {
     }
   });
   if (opens > closes) {
+    const lastOpen = openLines[openLines.length - 1];
+    // 找到最后一个 subgraph 的内容在哪里结束 —— 在它之后补 end，而不是追加到整篇文档末尾
+    const baseIndent = (lines[lastOpen].match(/^\s*/) || [''])[0].length;
+    let insertAt = lines.length;
+    for (let i = lastOpen + 1; i < lines.length; i += 1) {
+      const raw = lines[i];
+      const t = raw.trim();
+      if (!t || t.startsWith('%%')) continue;
+      const indent = (raw.match(/^\s*/) || [''])[0].length;
+      if (indent <= baseIndent) { insertAt = i; break; }
+    }
     out.push({
-      line: openLines[openLines.length - 1] + 1,
+      line: bodyLineOffset + lastOpen + 1,
+      lineIndex: bodyLineOffset + lastOpen,
       rule: 'missing-end',
       severity: 'error',
       auto: true,
       message: `有 ${opens} 个 subgraph 但只有 ${closes} 个 end，缺少 ${opens - closes} 个 end`,
       before: null,
       after: null,
-      appendEnd: opens - closes,
+      insertEndAt: bodyLineOffset + insertAt,
+      insertEndCount: opens - closes,
     });
   } else if (closes > opens) {
     out.push({
-      line: 0,
+      line: bodyLineOffset + 1,
+      lineIndex: bodyLineOffset,
       rule: 'extra-end',
-      severity: 'error',
+      severity: 'warn',
       auto: false,
-      message: `有 ${closes} 个 end 但只有 ${opens} 个 subgraph，多出 ${closes - opens} 个 end`,
+      message: `有 ${closes} 个 end 但只有 ${opens} 个 subgraph，多出 ${closes - opens} 个 end（不会自动删除，请确认后手动处理）`,
       before: null,
       after: null,
-      removeEnd: closes - opens,
     });
   }
   return out;
@@ -398,15 +424,18 @@ function ruleSubgraphEnd(src) {
  */
 function ruleSankeyCjk(src) {
   const out = [];
-  const { body } = splitFrontmatter(src);
+  const { body, bodyLineOffset } = splitFrontmatter(src);
   const lines = body.split(/\r?\n/);
-  if (!/^\s*sankey(-beta)?\b/.test(lines.find((l) => l.trim()) || '')) return out;
+  // 用 firstMeaningfulLine：跳过 %% 注释行，否则首行是注释时会漏检
+  const first = firstMeaningfulLine(body);
+  if (!first || !/^sankey(-beta)?\b/.test(first.text)) return out;
   lines.forEach((line, i) => {
     const t = line.trim();
     if (!t || t.startsWith('%%')) return;
     if (/[\u4e00-\u9fa5\u3040-\u30ff\uac00-\ud7af]/.test(t)) {
       out.push({
-        line: i + 1,
+        line: bodyLineOffset + i + 1,
+        lineIndex: bodyLineOffset + i,
         rule: 'sankey-cjk',
         severity: 'error',
         auto: false,
@@ -434,6 +463,7 @@ function ruleLooseEnds(src) {
     if (m) {
       out.push({
         line: i + 1,
+        lineIndex: i,
         rule: 'unclosed-label',
         severity: 'warn',
         auto: false,
@@ -453,14 +483,72 @@ function ruleLooseEnds(src) {
 const RULES = [ruleDefaultRenderer, ruleInitDirective, ruleKeyword, ruleFullwidthPunct, ruleSubgraphEnd, ruleSankeyCjk, ruleLooseEnds];
 
 /** 只做检测，不改代码 */
-export function analyze(src) {
+
+/**
+ * 拆出文档里的 ```mermaid 代码块（返回 null 表示这不是 markdown 多图文档）。
+ * 每块带上它在整篇源码中的起始行号，供行号换算。
+ */
+export function splitMermaidBlocks(src) {
+  const lines = toLines(src);
+  const blocks = [];
+  let inFence = false;
+  let start = 0;
+  let buf = [];
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i];
+    if (/^\s*```/.test(line)) {
+      if (inFence) {
+        blocks.push({ startLine: start, text: buf.join('\n') });
+        buf = [];
+        inFence = false;
+      } else {
+        inFence = true;
+        start = i + 1; // 围栏之后的��行就是块内容的第 0 行
+      }
+      continue;
+    }
+    if (inFence) buf.push(line);
+  }
+  if (!blocks.length) return null;
+  // 只有真的含 mermaid 围栏才按 markdown 处理；普通 ``` 代码块不算
+  const re = /```mermaid\s*\n([\s\S]*?)```/g;
+  const hasMermaid = re.test(src);
+  return hasMermaid ? blocks : null;
+}
+
+/** 对一段文本跑全部规则 */
+function runRules(text) {
   const issues = [];
   for (const rule of RULES) {
     try {
-      issues.push(...rule(src));
+      issues.push(...rule(text));
     } catch {
       /* 单条规则失败不影响整体 */
     }
+  }
+  return issues;
+}
+
+export function analyze(src) {
+  // markdown 多图文档：只分析 ```mermaid 围栏里的代码，
+  // 否则散文里的【】、全角标点会被当成 mermaid 语法改坏。
+  const blocks = splitMermaidBlocks(src);
+  let issues = [];
+  if (blocks) {
+    blocks.forEach((b) => {
+      runRules(b.text).forEach((i) => {
+        const shifted = {
+          ...i,
+          line: (i.line || 0) + b.startLine,
+          lineIndex: typeof i.lineIndex === 'number' ? i.lineIndex + b.startLine : i.lineIndex,
+        };
+        // insertEndAt 是相对块内容的行号，也要跟着换算
+        if (typeof shifted.insertEndAt === 'number') shifted.insertEndAt += b.startLine;
+        issues.push(shifted);
+      });
+    });
+  } else {
+    issues = runRules(src);
   }
   issues.sort((a, b) => (a.line || 0) - (b.line || 0));
   const type = detectType(src);
@@ -474,6 +562,21 @@ export function analyze(src) {
 
 /** 识别图类型 */
 export function detectType(src) {
+  const blocks = splitMermaidBlocks(src);
+  if (blocks && blocks.length) {
+    const first = firstMeaningfulLine(blocks[0].text);
+    if (!first) return { kw: null, type: null, label: null };
+    const m0 = /^([A-Za-z][A-Za-z0-9\-_]*)/.exec(first.text);
+    if (!m0) return { kw: null, type: null, label: null };
+    const hit0 = DIAGRAM_TYPES.find((d) => d.kw === m0[1]);
+    if (hit0) return { kw: m0[1], type: hit0.type, label: hit0.label, legacy: !!hit0.legacy };
+    const alias0 = KEYWORD_ALIASES[m0[1]];
+    if (alias0) {
+      const t0 = DIAGRAM_TYPES.find((d) => d.kw === alias0);
+      return { kw: m0[1], type: t0 ? t0.type : null, label: t0 ? t0.label : null, aliasOf: alias0, legacy: true };
+    }
+    return { kw: m0[1], type: null, label: null, unknown: true };
+  }
   const { body } = splitFrontmatter(src);
   const first = firstMeaningfulLine(body);
   if (!first) return { kw: null, type: null, label: null };
@@ -493,14 +596,18 @@ export function detectType(src) {
 /**
  * 应用可自动化的修复。返回新代码 + 应用明细。
  * 只处理语义安全、确定性的改写。
+ *
+ * 定位一律走「行索引」，不用字符串查找：
+ * 同一段文本可能先出现在 %% 注释、frontmatter 或 markdown 散文里，
+ * 用 indexOf 会改错行，而且用户完全看不到。
  */
 export function applyFixes(src, { includeWarnings = true, includeInit = true } = {}) {
-  const { issues } = analyze(src);
   const applied = [];
   let code = src;
 
-  // 先做文档级迁移：%%{init}%% -> frontmatter
-  if (includeInit && issues.some((i) => i.rule === 'init-directive')) {
+  // 1) 先做文档级迁移：%%{init}%% -> frontmatter
+  //    这一步会重写 frontmatter，行数可能变化，所以放最前面。
+  if (includeInit) {
     const mig = migrateInitDirective(code);
     if (mig.applied.length) {
       code = mig.code;
@@ -508,34 +615,45 @@ export function applyFixes(src, { includeWarnings = true, includeInit = true } =
     }
   }
 
-  // 只有明确标记 auto 的问题才会被自动改写；其余只提示，避免改坏用户代码
+  // 2) 基于（可能已迁移的）代码重新分析，再按行索引改写
+  const { issues } = analyze(code);
   const wanted = issues.filter((i) => i.auto === true);
 
-  for (const issue of wanted) {
-    if (issue.after != null && issue.before != null) {
-      const idx = code.indexOf(issue.before);
-      if (idx === -1) continue;
-      code = code.slice(0, idx) + issue.after + code.slice(idx + issue.before.length);
-      applied.push({ ...issue, kind: 'replace' });
-    } else if (issue.keyword && issue.after) {
-      const lines = code.split('\n');
-      let changed = false;
-      for (let i = 0; i < lines.length; i += 1) {
-        if (new RegExp(`^(\\s*)${escapeRe(issue.before)}\\b`).test(lines[i])) {
-          lines[i] = lines[i].replace(new RegExp(`^(\\s*)${escapeRe(issue.before)}\\b`), `$1${issue.after}`);
-          changed = true;
-          break;
-        }
-      }
-      if (changed) {
-        code = lines.join('\n');
-        applied.push({ ...issue, kind: 'replace' });
-      }
-    } else if (issue.appendEnd) {
-      const trimmed = code.replace(/\s+$/, '');
-      code = `${trimmed}\n${'end\n'.repeat(issue.appendEnd)}`;
-      applied.push({ ...issue, kind: 'append' });
-    }
+  // 按行索引改写：从后往前改，避免前面的改动让后面的行号偏移
+  const byLine = wanted
+    .filter((i) => !i.keyword && typeof i.lineIndex === 'number' && i.after != null && i.before != null)
+    .sort((a, b) => b.lineIndex - a.lineIndex);
+
+  let lines = toLines(code);
+  for (const issue of byLine) {
+    const i = issue.lineIndex;
+    if (i < 0 || i >= lines.length) continue;
+    // 只有当这一行的内容确实还是规则看到的那一行时才改，防止误伤
+    if (lines[i].trim() !== issue.before.trim()) continue;
+    lines[i] = issue.after;
+    applied.push({ ...issue, kind: 'replace' });
+  }
+  if (byLine.length) code = lines.join('\n');
+
+  // 关键字别名：只改首行那个关键字本身
+  for (const issue of wanted.filter((i) => i.keyword && i.after)) {
+    const lines2 = toLines(code);
+    const i = issue.lineIndex;
+    if (i < 0 || i >= lines2.length) continue;
+    const re = new RegExp(`^(\\s*)${escapeRe(issue.before)}\\b`);
+    if (!re.test(lines2[i])) continue;
+    lines2[i] = lines2[i].replace(re, `$1${issue.after}`);
+    code = lines2.join('\n');
+    applied.push({ ...issue, kind: 'replace' });
+  }
+
+  // 补 end：插到对应 subgraph 的闭合位置，而不是整篇文档末尾
+  for (const issue of wanted.filter((i) => typeof i.insertEndAt === 'number')) {
+    const lines3 = toLines(code);
+    const at = Math.min(Math.max(issue.insertEndAt, 0), lines3.length);
+    lines3.splice(at, 0, ...Array(issue.insertEndCount || 1).fill('  end'));
+    code = lines3.join('\n');
+    applied.push({ ...issue, kind: 'insert' });
   }
 
   return { code, applied, issues };

@@ -23,6 +23,9 @@ def main():
         ctx = browser.new_context(viewport={"width": 1600, "height": 950}, device_scale_factor=2)
         page = ctx.new_page()
         errors = []
+        # 注意：网络监听必须挂在 goto() 之前，否则「加载时零请求」根本没被验证过
+        requests = []
+        page.on("request", lambda r: requests.append(r.url))
         page.on("console", lambda m: errors.append(f"{m.type}: {m.text}") if m.type == "error" else None)
         page.on("pageerror", lambda e: errors.append(f"pageerror: {e}"))
 
@@ -33,9 +36,7 @@ def main():
         svg_count = page.eval_on_selector_all("#zoomLayer svg", "els => els.length")
         check("首屏渲染出 SVG", svg_count >= 1, f"svg count = {svg_count}")
 
-        # --- 2. 离线：无任何网络请求 ---
-        requests = []
-        page.on("request", lambda r: requests.append(r.url))
+        # --- 2. 离线：无任何网络请求（含加载阶段）---
         page.wait_for_timeout(500)
         external = [r for r in requests if not r.startswith("file:") and not r.startswith("data:") and not r.startswith("blob:")]
         check("运行期零外部网络请求", len(external) == 0, external[:3])
@@ -208,6 +209,44 @@ flowchart TD
         hint = page.inner_text("#previewMsg .err-hint") if shown else ""
         check("超限时报错并给出放宽上限按钮", shown and raise_btn is not None and "maxEdges" in hint,
               f"shown={shown} btn={bool(raise_btn)} hint={hint[:90]}")
+
+        # --- 21. PNG 里的文字真的画出来了（深色像素差分）---
+        def png_dark_pixels(code):
+            page.evaluate("(c) => window.__lme.setCode(c)", code)
+            page.wait_for_timeout(900)
+            b64 = page.evaluate("""async () => {
+                const blob = await window.__lme.exportPngBlob(2);
+                const buf = new Uint8Array(await blob.arrayBuffer());
+                let bin = ''; for (let i = 0; i < buf.length; i++) bin += String.fromCharCode(buf[i]);
+                return btoa(bin);
+            }""")
+            from PIL import Image
+            import io
+            img = Image.open(io.BytesIO(base64.b64decode(b64))).convert("L")
+            px = list(img.getdata())
+            return sum(1 for v in px if v < 128)
+
+        with_text = png_dark_pixels("flowchart TD\n  A[唯一文字XYZ] --> B[另一个]\n")
+        without_text = png_dark_pixels("flowchart TD\n  A --> B\n")
+        check("导出 PNG 中文字真的画出来了", with_text > without_text + 200,
+              f"有字={with_text} 无字={without_text}")
+
+        # --- 22. Markdown 单个图块也能渲染 ---
+        single_md = "# 单图\n\n```mermaid\nflowchart TD\n  A-->B\n```\n\n结尾\n"
+        page.evaluate("(c) => window.__lme.setCode(c)", single_md)
+        page.wait_for_timeout(1400)
+        n_single = page.eval_on_selector_all("#zoomLayer .blk svg", "els => els.length")
+        err_single = page.eval_on_selector("#previewMsg", "el => el.classList.contains('show')")
+        check("Markdown 单个图块能渲染", n_single == 1 and not err_single,
+              f"svg={n_single} err={err_single}")
+
+        # --- 23. 时序图的 alt/end 不该被误报成「多出 end」---
+        page.evaluate("(c) => window.__lme.setCode(c)", "sequenceDiagram\n  alt first\n    A->>B: x\n  end\n")
+        page.wait_for_timeout(1000)
+        page.click(".tab[data-tab='compat']")
+        page.wait_for_timeout(300)
+        rules = page.evaluate("() => Array.from(document.querySelectorAll('.compat-item .ci-loc')).map(i => i.innerText)")
+        check("合法 sequenceDiagram 不误报 extra-end", not any("extra-end" in r for r in rules), rules)
 
         page.screenshot(path=str(ROOT / "output" / "screenshot-app.png"), full_page=False)
 

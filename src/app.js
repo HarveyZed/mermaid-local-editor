@@ -221,6 +221,9 @@ function initMermaid() {
   mermaid.initialize({ startOnLoad: false, securityLevel: 'strict', ...renderLimits });
 }
 
+// 只匹配几何属性里的 NaN：transform / path d / 坐标 / 尺寸
+const GEOMETRY_NAN = /\b(?:transform|d|points|x|y|x1|y1|x2|y2|cx|cy|r|rx|ry|width|height)\s*=\s*"[^"]*NaN[^"]*"/;
+
 /**
  * mermaid 对「超限」这类错误不会抛异常，而是渲染成一张「错误图」，
  * 肉眼看过去像正常图。这里把它识别出来，别让用户对着假图发呆。
@@ -245,6 +248,18 @@ function detectSvgError(svgText) {
   }
   if (svgText.includes('Syntax error in text')) {
     return { kind: 'syntax', message: 'mermaid 渲染出了语法错误图，请看图上的具体提示。', action: null, actionLabel: null };
+  }
+  // 超大图时 mermaid 会算出 NaN 几何（translate(0,NaN)），浏览器会报 SVG 属性错误。
+  // 与其把一张坏 SVG 塞进预览区，不如明确告诉用户「图太大了」。
+  // 只看几何属性：象限图的配色会合法地出现 hsl(240, 100%, NaN%)，那是 mermaid 上游
+  // 的配色 bug，不影响图形，不该拦下来。
+  if (GEOMETRY_NAN.test(svgText)) {
+    return {
+      kind: 'nan',
+      message: '布局引擎算出了无效坐标（NaN），这张图渲染不出来。常见原因：图太大（节点/边过多），或数据格式不对（例如 sankey 的第三列必须是数字）。建议先拆分图形或检查数据。',
+      action: null,
+      actionLabel: null,
+    };
   }
   return null;
 }
@@ -312,7 +327,7 @@ async function renderNow(force = false, analysisOnly = false) {
       const svgErr = detectSvgError(svg);
       if (svgErr) {
         showError(new Error(svgErr.message), svgErr);
-        $('#stRender').textContent = '渲染失败（超限）';
+        $('#stRender').textContent = svgErr.kind === 'nan' ? '渲染失败（图形过大）' : '渲染失败（超限）';
         $('#stRender').style.color = 'var(--danger)';
         return;
       }
@@ -337,7 +352,9 @@ function extractBlocks(code) {
   const found = [];
   let m;
   while ((m = re.exec(code)) !== null) found.push(m[1].trim());
-  if (found.length > 1) {
+  // 只要有围栏就按 markdown 处理：单图块也必须能渲染，
+  // 否则整篇 markdown 会被当成 mermaid 源码去解析，直接报「没有匹配到图类型」。
+  if (found.length >= 1) {
     state.blocks = found;
     const nav = $('#blockNav');
     nav.classList.remove('hidden');
@@ -408,7 +425,14 @@ function showError(err, svgErrIn = null) {
 }
 
 function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&', '<': '<', '>': '>', '"': '"', "'": '&#39;' }[c]));
+  const map = {
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;',
+  };
+  return String(s).replace(/[&<>"']/g, (c) => map[c]);
 }
 
 function gotoLine(line) {
@@ -474,9 +498,13 @@ function updateCompatPanel(analysis) {
           toast('该指令无法自动解析，请手动调整');
         }
       } else if (issue.keyword && issue.after) {
-        replaceInEditor(issue.before, issue.after, true);
+        if (!replaceKeywordAt(issue.lineIndex, issue.before, issue.after)) {
+          toast('未能定位到该关键字所在行，请手动修改');
+        }
       } else if (issue.after != null && issue.before != null) {
-        replaceInEditor(issue.before, issue.after, false);
+        if (!replaceLineByIndex(issue.lineIndex, issue.before, issue.after)) {
+          toast('未能定位到该行，请手动修改');
+        }
       } else {
         applyFixesToEditor();
       }
@@ -485,28 +513,37 @@ function updateCompatPanel(analysis) {
   });
 }
 
-function replaceInEditor(before, after, regexWord) {
-  const code = editor.state.doc.toString();
-  let idx = -1;
-  if (regexWord) {
-    const re = new RegExp(`^(\\s*)${before.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'm');
-    const m = re.exec(code);
-    if (m) {
-      idx = m.index;
-      const start = m.index + m[1].length;
-      editor.dispatch({ changes: { from: start, to: start + before.length, insert: after } });
-      editor.focus();
-      return;
-    }
-  } else {
-    idx = code.indexOf(before);
-    if (idx !== -1) {
-      editor.dispatch({ changes: { from: idx, to: idx + before.length, insert: after } });
-      editor.focus();
-      return;
-    }
-  }
-  toast('未能在源码中定位到该片段');
+/**
+ * 按「行索引」精确替换某一行。
+ * 不用字符串查找：同一段文本可能先出现在 %% 注释、frontmatter 或 markdown 散文里，
+ * 全文搜索会改错行，而且用户完全看不出来。
+ */
+function replaceLineByIndex(lineIndex, expected, replacement) {
+  const doc = editor.state.doc;
+  const n = doc.lines;
+  if (lineIndex < 0 || lineIndex >= n) return false;
+  const line = doc.line(lineIndex + 1);
+  if (line.text.trim() !== String(expected).trim()) return false;
+  editor.dispatch({
+    changes: { from: line.from, to: line.to, insert: replacement },
+  });
+  editor.focus();
+  return true;
+}
+
+/** 关键字别名：只改那一行开头的关键字 */
+function replaceKeywordAt(lineIndex, before, after) {
+  const doc = editor.state.doc;
+  if (lineIndex < 0 || lineIndex >= doc.lines) return false;
+  const line = doc.line(lineIndex + 1);
+  const re = new RegExp(`^(\\s*)${before.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`);
+  const m = re.exec(line.text);
+  if (!m) return false;
+  editor.dispatch({
+    changes: { from: line.from + m[1].length, to: line.from + m[1].length + before.length, insert: after },
+  });
+  editor.focus();
+  return true;
 }
 
 function applyFixesToEditor() {
@@ -689,12 +726,12 @@ async function exportSvg() {
     const svgs = await renderForExport();
     if (!svgs.length) return;
     if (svgs.length === 1) {
-      downloadBlob(new Blob([svgs[0]], { type: 'image/svg+xml;charset=utf-8' }), `${baseName()}.svg`);
+      downloadBlob(new Blob([serializeSvg(svgs[0])], { type: 'image/svg+xml;charset=utf-8' }), `${baseName()}.svg`);
       toast('已导出 SVG');
     } else {
       // 多个 SVG 根节点不能拼在一个文件里，按序号分别导出
       svgs.forEach((svg, i) => {
-        downloadBlob(new Blob([svg], { type: 'image/svg+xml;charset=utf-8' }), `${baseName()}-${i + 1}.svg`);
+        downloadBlob(new Blob([serializeSvg(svg)], { type: 'image/svg+xml;charset=utf-8' }), `${baseName()}-${i + 1}.svg`);
       });
       toast(`已导出 ${svgs.length} 个 SVG`);
     }
@@ -753,7 +790,7 @@ async function copySvg() {
   try {
     const svgs = await renderForExport();
     if (!svgs.length) return;
-    await navigator.clipboard.writeText(svgs[0]);
+    await navigator.clipboard.writeText(serializeSvg(svgs[0]));
     toast(svgs.length > 1 ? '已复制第 1 个 SVG（共 ' + svgs.length + ' 个）' : 'SVG 已复制到剪贴板');
   } catch (e) {
     toast('复制失败：' + String(e).slice(0, 100));
@@ -941,14 +978,64 @@ function applyPreset(name) {
 // 这些图类型的缩进是有语义的（mindmap 用缩进表达层级），整理缩进会毁掉结构
 const INDENT_SENSITIVE = new Set(['mindmap']);
 
+/** 对一段 mermaid 代码重排缩进 */
+function reindentMermaid(text) {
+  let depth = 0;
+  return text.split(/\r?\n/).map((raw) => {
+    const t = raw.trim();
+    if (!t) return '';
+    if (/^end\b/.test(t)) depth = Math.max(0, depth - 1);
+    const line = '  '.repeat(depth) + t;
+    if (/^subgraph\b/.test(t)) depth += 1;
+    return line;
+  }).join('\n').replace(/\n{3,}/g, '\n\n');
+}
+
 function formatCode() {
   const code = editor.state.doc.toString();
+  const { frontmatter, body } = splitFrontmatter(code);
+
+  // markdown 文档：只整理 ```mermaid 围栏里的代码，
+  // 围栏本身、散文、列表一律原样保留 —— 否则闭合围栏被缩进后就不再是围栏了。
+  if (/```/.test(body)) {
+    const lines = body.split(/\r?\n/);
+    const out = [];
+    let inFence = false;
+    let buf = [];
+    let changed = false;
+    const flush = () => {
+      if (!buf.length) return;
+      const formatted = reindentMermaid(buf.join('\n'));
+      if (formatted !== buf.join('\n')) changed = true;
+      out.push(formatted);
+      buf = [];
+    };
+    for (const line of lines) {
+      if (/^\s*```/.test(line)) {
+        flush();
+        inFence = !inFence;
+        out.push(line);
+        continue;
+      }
+      if (inFence) buf.push(line); else out.push(line);
+    }
+    flush();
+    if (!changed) {
+      toast('缩进已经是规范的，无需整理');
+      return;
+    }
+    const next = (frontmatter ? `---\n${frontmatter}\n---\n` : '') + out.join('\n');
+    editor.dispatch({ changes: { from: 0, to: editor.state.doc.length, insert: next } });
+    renderNow(true);
+    toast('已整理 mermaid 代码块缩进');
+    return;
+  }
+
   const type = detectType(code);
   if (type.type && INDENT_SENSITIVE.has(type.type)) {
     toast(`${type.label || type.type} 用缩进表达层级，已跳过整理`);
     return;
   }
-  const { frontmatter, body } = splitFrontmatter(code);
   const lines = body.split(/\r?\n/);
   let depth = 0;
   const out = lines.map((raw) => {
