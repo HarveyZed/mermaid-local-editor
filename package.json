@@ -4,7 +4,11 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "build": "node build.mjs"
+    "build": "node build.mjs",
+    "test": "node test/compat.test.mjs && node test/artifact.test.mjs",
+    "test:unit": "node test/compat.test.mjs",
+    "test:artifact": "node test/artifact.test.mjs",
+    "test:e2e": "python3 test/e2e.py"
   },
   "dependencies": {
     "@codemirror/autocomplete": "^6.18.6",

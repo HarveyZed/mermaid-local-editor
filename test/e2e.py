@@ -1,5 +1,6 @@
 import base64
 import json
+import os
 import pathlib
 import sys
 import xml.etree.ElementTree as ET
@@ -9,9 +10,24 @@ from playwright.sync_api import sync_playwright
 HERE = pathlib.Path(__file__).parent
 ROOT = HERE.parent
 APP = ROOT / "output" / "mermaid-local-editor.html"
-CHROME = "/root/.cache/ms-playwright/chromium-1243/chrome-linux/chrome"
+# 沙箱里装浏览器时的固定位置（CI 上用 playwright 自带的，无需指定）
+FALLBACK_CHROME = "/root/.cache/ms-playwright/chromium-1243/chrome-linux/chrome"
 
 results = []
+
+
+def launch_chromium(p):
+    """按优先级找可用的 Chromium：环境变量 → Playwright 自带 → 本机固定路径"""
+    args = ["--no-sandbox", "--disable-dev-shm-usage"]
+    env_path = os.environ.get("CHROME_PATH")
+    if env_path and pathlib.Path(env_path).exists():
+        return p.chromium.launch(executable_path=env_path, args=args)
+    try:
+        return p.chromium.launch(args=args)
+    except Exception:
+        if pathlib.Path(FALLBACK_CHROME).exists():
+            return p.chromium.launch(executable_path=FALLBACK_CHROME, args=args)
+        raise
 
 
 def check(name, ok, detail=""):
@@ -21,7 +37,7 @@ def check(name, ok, detail=""):
 
 def main():
     with sync_playwright() as p:
-        browser = p.chromium.launch(executable_path=CHROME, args=["--no-sandbox", "--disable-dev-shm-usage"])
+        browser = launch_chromium(p)
         ctx = browser.new_context(viewport={"width": 1600, "height": 950}, device_scale_factor=2)
         page = ctx.new_page()
         errors = []
