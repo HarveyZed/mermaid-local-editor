@@ -119,14 +119,25 @@ npm run build          # → output/mermaid-local-editor.html
 ## 测试
 
 ```bash
-node test/compat.test.mjs        # 34 项兼容层单测
-python3 test/e2e.py              # 19 项 Playwright 端到端测试
+node test/compat.test.mjs        # 53 项兼容层单测
+node test/artifact.test.mjs      #  8 项产物完整性测试
+python3 test/e2e.py              # 46 项 Playwright 端到端测试
 ```
 
-e2e 覆盖（23 项）：首屏渲染、运行期零外部请求、无 console error、编辑重渲染、兼容检出与自动修复、
-一键修复写回、22 个样例全部可渲染、SVG/PNG 导出合法性、缩放、分享链接往返、
-设置写 frontmatter、localStorage、界面主题切换、全屏、Markdown 多图、
+或者 `npm test`（单测 + 产物测试）与 `npm run test:e2e`。
+
+**产物完整性测试**把「单文件 / 离线 / 零外链」这个核心承诺变成可断言的：
+检查产物里没有 `src`/`href` 外链、没有 `@import` 规则、没有远程 `url()`、没有外链 script/link，
+并确认 ZIP 打包器与 `escapeHtml` 实体表还在。
+
+**端到端测试**全部走真实链路：点真实按钮、接真实下载文件（不是调内部 API），
+覆盖首屏渲染、运行期零外部请求、无 console error、编辑重渲染、兼容检出与自动修复、
+一键修复写回、22 个样例全部可渲染、**批量导出 SVG 的 ZIP 内容校验**、PNG 导出与深色像素校验、
+缩放、分享链接往返、设置写 frontmatter、localStorage、界面主题切换、全屏、Markdown 多图、
+**23 个图块时导航条不溢出**、三处折叠与状态持久化、
 打开本地 `.md`（多图）、打开老代码 `.mmd`（自动兼容救回且原文不被改写）、超限时的放宽提示。
+
+CI（`.github/workflows/ci.yml`）会跑完上面全部三套；打 tag 时还会自动把构建产物挂到 Release。
 
 ### 兼容性说明
 Mermaid v12 要求 **ES2024 / Safari 17.4+ / Node 22.12+**。
@@ -134,6 +145,80 @@ Mermaid v12 要求 **ES2024 / Safari 17.4+ / Node 22.12+**。
 Safari / Firefox 未在本环境实测，若出现兼容问题优先检查浏览器版本是否满足 v12 的要求。
 
 ---
+
+## 给贡献者
+
+这个项目踩过的坑基本都集中在两类：**测试没走到真实链路**，和**本地有、CI 没有的差异**。
+下面每一条都对应一次真实事故，改代码前值得扫一眼。
+
+### 一、测试必须走真实链路
+
+前三个 bug（审计发现 9 个缺陷、导出 SVG 崩溃、图块标签号溢出压住侧栏）
+**没有一个是被单测发现的**，因为测试都绕开了真正的代码路径：
+
+| 错误做法 | 后果 | 正确做法 |
+|---|---|---|
+| 用 `exportSvgText()` 测导出 | 它返回原始字符串，绕过了 `serializeSvg()`，真正的导出崩溃测不出来 | 点真实按钮 + 接真实下载文件 |
+| 网络监听挂在 `page.goto()` **之后** | 「加载时零请求」这个核心承诺**从来没被验证过** | 监听必须挂在 `goto()` 之前 |
+| 只测单图 | 多图 markdown 的 `htmlLabels:false` 传不到图块，PNG 画布被污染 | 用含多个图块的 markdown 测 |
+| 断言渲染出的 DOM | 布局溢出、按钮重叠这类问题看不见 | 量 `getBoundingClientRect()`，看有没有压住别的元素 |
+
+写新测试时先问一句：**这条测试如果功能坏了，它真的会红吗？**
+改完记得反向验证一次——把代码临时改回旧行为，确认测试确实报红。
+
+### 二、本地有、CI 没有的依赖 = 隐性雷
+
+PNG 深色像素检查原本用 Pillow，本地装了、CI 没装，CI 第一次跑就挂在
+`ModuleNotFoundError: No module named 'PIL'`。
+
+现在 e2e **零 Python 第三方依赖**（PNG 解码自己写在 `test/pngread.py`，
+有 Pillow 时优先用它，两者结果实测一致）。
+新增依赖前先想清楚：CI 上装得起来吗？本地装了不代表 CI 有。
+
+### 三、别用 `git reset --hard` 冲掉未提交的改动
+
+有一次为了同步远端分支跑了 `git reset --hard`，把工作区里**已经改好但还没提交**的
+`test/e2e.py` 冲没了，导致 CI 连续挂了两轮才发现。
+
+改完代码**先提交再 reset**。要同步远端用 `git pull --rebase` 或 `git fetch` + `git reset --soft`。
+
+### 四、mermaid v12 的几个 API 陷阱
+
+写代码时直接踩过：
+
+- **`mermaid.render()` 返回的是字符串，不是 DOM 元素。**
+  对它调 `cloneNode()` 会抛 `TypeError: i.cloneNode is not a function`。
+- **mermaid 的 frontmatter 必须紧贴图源码前面。**
+  markdown 里用 `extractBlocks` 只取 ```mermaid 围栏内的内容，
+  文档顶部的 frontmatter 不在任何一个围栏里，会被**整体丢掉** →
+  逐图块的 config（尤其 `htmlLabels:false`）到不了图块上。
+  所以配置要**逐块重新套用**：文档级 `config` 作默认，块内 frontmatter 优先。
+- **SVG 元素没有 `offsetTop` / `offsetLeft`**（那是 HTMLElement 专有的）。
+  要拿图在图层里的位置，得用父级容器的 offset + 相对位移 ÷ 当前缩放。
+- 标签里的中文引号 `“”`、全角冒号 `：` 是**合法**的，别乱改；
+  真正会炸的是全角 `【】` 和 `（）`，且只在方括号外。
+
+### 五、浏览器的下载上限
+
+**Chromium 对「一次性触发的多个下载」有 10 个的硬上限**
+（`DownloadRequestLimiter::kMaxDownloadsAtOnce`），超出部分被静默丢弃，连报错都没有。
+
+所以多文件导出必须**打包成一个 ZIP 一次下载**，不能发 N 次下载。
+ZIP 打包器是自己写的（STORE 模式，约 90 行，无外部依赖），别退化回逐个下载。
+
+### 六、构建是可复现的
+
+CI 从干净检出独立构建的产物，与本地构建 **sha256 完全一致**。
+这意味着：CI 跑绿了就等于能发版，产物不需要手工传。
+
+顺带一个坑：`actions/upload-artifact` 会压缩，
+所以 artifact 显示的大小和原始文件大小对不上，**要解包再比 sha256**。
+
+### 七、几条约定
+
+- 提交信息用中文，说清「改了什么」和「为什么」，别只写「修复 bug」。
+- 改了 `src/` 就要跑一遍全部三套测试；改了构建流程要确认产物 sha256 没变。
+- 别把 `node_modules/`、`vendor/`、`output/`、`__pycache__/` 提交进去（`.gitignore` 已处理）。
 
 ## 独立审计
 
@@ -166,8 +251,12 @@ lme/
 │   ├── highlight.js       # CodeMirror 的 Mermaid 语言模式
 │   └── samples.js         # 22 个 v12 语法样例
 ├── test/
-│   ├── compat.test.mjs
-│   └── e2e.py
+│   ├── compat.test.mjs       # 兼容层单测（53 项）
+│   ├── artifact.test.mjs     # 产物完整性测试（8 项）
+│   ├── e2e.py                # 端到端测试（46 项）
+│   └── pngread.py            # 纯标准库 PNG 解码（e2e 用，零依赖）
+├── .github/workflows/
+│   └── ci.yml                # CI：测试 + 构建 + 自动挂 Release
 └── output/
     └── mermaid-local-editor.html
 ```
@@ -178,6 +267,11 @@ lme/
 
 - **云端功能未实现**（Mermaid Chart 账号、在线分享到 mermaid.live、Kroki/Analytics 上报）——
   本工具的定位就是纯本地，这些功能没有意义。
-- **PNG 仅支持单图**：多图模式（`.md`）下 PNG 只导出第 1 张；SVG 会按序号分别导出。
+- **多图导出会打包成 ZIP**，不是散装的一堆文件——Chromium 对一次性触发的多个下载有 10 个硬上限
+  （详见「给贡献者」一节）。单图仍是直出 `.svg` / `.png`。
 - **分享链接只能在同一台机器上还原**：链接把代码塞进 URL hash，跨设备分享需要先把 HTML 一起传过去。
 - `sankey-beta` 的节点名在 v12 仍不支持中文（上游限制，兼容层会提前警告）。
+- **未在 Safari / Firefox 实测**：Mermaid v12 要求 ES2024 / Safari 17.4+，
+  代码本身没用到 Chromium 专属 API，但没条件跑跨浏览器验证。
+- **图块导航在超窄窗口会先滚动再换行**：窗口小于约 700px 时预览区太窄，
+  导航条会占掉较多垂直空间，这时建议直接收起侧栏。
