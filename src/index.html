@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Mermaid Local · 离线 v12 编辑器</title>
+<style>/*__CSS__*/</style>
+</head>
+<body>
+<div id="app" class="app">
+
+  <!-- ============ 顶栏 ============ -->
+  <header class="topbar">
+    <div class="brand">
+      <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+        <path d="M4 4h7v7H4zM13 4h7v4h-7zM13 10h7v10h-7zM4 13h7v7H4z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
+      </svg>
+      <span>Mermaid Local</span>
+      <em id="verBadge" class="badge" title="内置 Mermaid 版本">v12</em>
+      <em id="netBadge" class="badge badge-ok" title="本页不发起任何网络请求">离线</em>
+    </div>
+
+    <div class="topbar-file">
+      <input id="fileName" class="file-name" value="未命名.mmd" spellcheck="false" title="文件名">
+      <span id="typeBadge" class="badge badge-type">—</span>
+      <span id="compatBadge" class="badge badge-hidden"></span>
+    </div>
+
+    <div class="topbar-actions">
+      <button id="btnNew"     class="btn" title="新建 (Ctrl+N)">新建</button>
+      <button id="btnOpen"    class="btn" title="打开本地文件 (Ctrl+O)">打开</button>
+      <button id="btnSave"    class="btn" title="保存 .mmd (Ctrl+S)">保存</button>
+      <span class="sep"></span>
+      <button id="btnPng"     class="btn" title="导出 PNG">PNG</button>
+      <button id="btnSvg"     class="btn" title="导出 SVG">SVG</button>
+      <button id="btnCopy"    class="btn" title="复制 SVG 到剪贴板">复制</button>
+      <span class="sep"></span>
+      <button id="btnShare"   class="btn" title="生成可分享链接 (Ctrl+Shift+L)">链接</button>
+      <button id="btnFull"    class="btn" title="全屏预览 (Ctrl+Shift+F)">全屏</button>
+      <button id="btnTheme"   class="btn btn-icon" title="切换深/浅色界面">◐</button>
+    </div>
+    <input type="file" id="fileInput" accept=".mmd,.mermaid,.md,.txt,text/plain,text/markdown" hidden>
+  </header>
+
+  <!-- ============ 修复提示条 ============ -->
+  <div id="fixBar" class="fixbar hidden"></div>
+
+  <!-- ============ 主体 ============ -->
+  <main class="main">
+    <!-- 左：编辑器 -->
+    <section class="pane pane-editor" id="paneEditor">
+      <div class="pane-head">
+        <span class="pane-title">代码</span>
+        <div class="pane-tools">
+          <label class="switch" title="渲染前自动应用安全修复">
+            <input type="checkbox" id="autoFix" checked><span>自动兼容</span>
+          </label>
+          <button class="mini" id="btnFixNow" title="立即应用所有可修复项">一键修复</button>
+          <button class="mini" id="btnFormat" title="整理缩进">整理</button>
+        </div>
+      </div>
+      <div id="editor" class="editor-host"></div>
+    </section>
+
+    <!-- 分隔条 -->
+    <div class="splitter" id="splitter" title="拖动调整宽度"></div>
+
+    <!-- 中：预览 -->
+    <section class="pane pane-preview" id="panePreview">
+      <div class="pane-head">
+        <span class="pane-title">预览</span>
+        <div class="pane-tools" id="zoomTools">
+          <button class="mini" id="btnZoomOut" title="缩小">−</button>
+          <span id="zoomLabel" class="zoom-label">100%</span>
+          <button class="mini" id="btnZoomIn" title="放大">＋</button>
+          <button class="mini" id="btnZoomFit" title="适应窗口 (Ctrl+0)">适应</button>
+          <button class="mini" id="btnZoomReset" title="重置 (Ctrl+1)">重置</button>
+          <span id="blockNav" class="block-nav hidden"></span>
+        </div>
+      </div>
+      <div id="preview" class="preview">
+        <div id="zoomLayer" class="zoom-layer"></div>
+        <div id="previewMsg" class="preview-msg"></div>
+      </div>
+    </section>
+
+    <!-- 右：侧栏 -->
+    <div class="splitter splitter-v" id="splitterV" title="拖动调整宽度"></div>
+    <aside class="side" id="side">
+      <div class="tabs">
+        <button class="tab active" data-tab="settings">设置</button>
+        <button class="tab" data-tab="compat">兼容<span id="compatCount" class="dot hidden"></span></button>
+        <button class="tab" data-tab="samples">样例</button>
+        <button class="tab" data-tab="help">帮助</button>
+      </div>
+
+      <div class="tab-body active" data-panel="settings">
+        <h4>外观预设</h4>
+        <div class="preset-row" id="presets">
+          <button class="preset active" data-preset="v12">v12 默认</button>
+          <button class="preset" data-preset="classic">经典 v11</button>
+          <button class="preset" data-preset="dark">暗色</button>
+          <button class="preset" data-preset="hand">手绘</button>
+        </div>
+
+        <h4>逐项覆盖（写入 frontmatter）</h4>
+        <label class="field"><span>theme</span>
+          <select id="cfgTheme">
+            <option value="">（跟随默认）</option>
+            <option value="default">default</option>
+            <option value="base">base</option>
+            <option value="dark">dark</option>
+            <option value="neutral">neutral</option>
+            <option value="forest">forest</option>
+            <option value="redux-color">redux-color</option>
+            <option value="redux-dark-color">redux-dark-color</option>
+            <option value="redux">redux</option>
+            <option value="redux-dark">redux-dark</option>
+            <option value="neo">neo</option>
+            <option value="null">null</option>
+          </select>
+        </label>
+        <label class="field"><span>look</span>
+          <select id="cfgLook">
+            <option value="">（跟随默认）</option>
+            <option value="classic">classic</option>
+            <option value="handDrawn">handDrawn</option>
+            <option value="neo">neo</option>
+          </select>
+        </label>
+        <label class="field"><span>layout</span>
+          <select id="cfgLayout">
+            <option value="">（跟随默认 = elk）</option>
+            <option value="dagre">dagre</option>
+            <option value="elk">elk</option>
+          </select>
+        </label>
+        <label class="field"><span>字体</span>
+          <input id="cfgFont" type="text" placeholder="留空则用系统字体" spellcheck="false"></label>
+
+        <h4>行为</h4>
+        <label class="switch"><input type="checkbox" id="cfgMaxWidth" checked><span>图表宽度自适应 (useMaxWidth)</span></label>
+        <label class="switch"><input type="checkbox" id="cfgHtmlLabels" checked><span>HTML 标签（关掉可正常导出 PNG）</span></label>
+        <label class="field"><span>securityLevel</span>
+          <select id="cfgSecurity">
+            <option value="strict">strict</option>
+            <option value="loose">loose</option>
+            <option value="antiscript">antiscript</option>
+          </select>
+        </label>
+        <div class="row-gap">
+          <button class="btn wide" id="btnApplyCfg">应用到代码</button>
+          <button class="btn wide ghost" id="btnClearCfg">清除配置</button>
+        </div>
+
+        <h4>本地存储</h4>
+        <p class="hint">自动保存到浏览器 localStorage，关闭页面不丢。仅存在本机，不上传。</p>
+        <div class="row-gap">
+          <button class="btn wide ghost" id="btnResetLocal">恢复默认示例</button>
+        </div>
+      </div>
+
+      <div class="tab-body" data-panel="compat">
+        <div class="compat-head">
+          <span id="compatSummary" class="compat-summary">未发现兼容问题</span>
+          <button class="mini" id="btnFixAll">全部修复</button>
+        </div>
+        <div id="compatList" class="compat-list"></div>
+        <h4>规则说明</h4>
+        <ul class="rules">
+          <li><b>defaultRenderer → layout</b>：v12 删除了该配置项，旧写法不报错但完全失效（最易踩坑）。</li>
+          <li><b>关键字别名</b>：<code>swimlanes</code>/<code>usecase</code>/<code>flowchart-v2</code> 等在 v12 中不是合法关键字。</li>
+          <li><b>中文全角标点</b>：<code>【】</code>、<code>“”</code>、<code>：</code> 会直接触发词法错误。</li>
+          <li><b>subgraph / end</b>：数量不匹配是最常见的结构错误。</li>
+        </ul>
+      </div>
+
+      <div class="tab-body" data-panel="samples">
+        <input id="sampleSearch" class="search" type="search" placeholder="搜索样例…">
+        <div id="sampleList" class="sample-list"></div>
+      </div>
+
+      <div class="tab-body" data-panel="help">
+        <h4>快捷键</h4>
+        <ul class="keys">
+          <li><kbd>Ctrl</kbd>+<kbd>S</kbd> 保存 .mmd</li>
+          <li><kbd>Ctrl</kbd>+<kbd>O</kbd> 打开文件</li>
+          <li><kbd>Ctrl</kbd>+<kbd>Enter</kbd> 立即渲染</li>
+          <li><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>F</kbd> 全屏预览</li>
+          <li><kbd>Ctrl</kbd>+<kbd>0</kbd> 适应窗口</li>
+          <li><kbd>Ctrl</kbd>+<kbd>F</kbd> 代码内搜索</li>
+        </ul>
+        <h4>Markdown 多图</h4>
+        <p class="hint">打开含 <code>```mermaid</code> 代码块的 .md 文件时，预览区会自动按顺序渲染全部图表。</p>
+        <h4>关于</h4>
+        <p class="hint">单文件离线应用，内置 Mermaid <b id="helpVer">v12</b> + ELK 布局引擎。
+        打开时不发起任何网络请求，代码与配置只保存在本机浏览器。</p>
+      </div>
+    </aside>
+  </main>
+
+  <!-- ============ 状态栏 ============ -->
+  <footer class="statusbar">
+    <span id="stPos">1:1</span>
+    <span id="stType">—</span>
+    <span id="stRender">—</span>
+    <span class="spacer"></span>
+    <span id="stAuto">自动兼容：开</span>
+    <span class="dot-sep"></span>
+    <span id="stSaved">本地已保存</span>
+  </footer>
+
+  <!-- ============ 提示层 ============ -->
+  <div id="toast" class="toast"></div>
+
+  <div id="lightbox" class="lightbox hidden">
+    <div class="lightbox-inner">
+      <div class="lightbox-head">
+        <span id="lightboxTitle">预览</span>
+        <div>
+          <button class="mini" id="lbPng">PNG</button>
+          <button class="mini" id="lbSvg">SVG</button>
+          <button class="mini" id="lbClose">关闭 (Esc)</button>
+        </div>
+      </div>
+      <div id="lightboxBody" class="lightbox-body"></div>
+    </div>
+  </div>
+</div>
+
+<script>/*__MERMAID__*/</script>
+<script>/*__VENDOR__*/</script>
+<script>/*__APP__*/</script>
+</body>
+</html>

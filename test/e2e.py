@@ -1,0 +1,225 @@
+import json
+import pathlib
+import sys
+
+from playwright.sync_api import sync_playwright
+
+HERE = pathlib.Path(__file__).parent
+ROOT = HERE.parent
+APP = ROOT / "output" / "mermaid-local-editor.html"
+CHROME = "/root/.cache/ms-playwright/chromium-1243/chrome-linux/chrome"
+
+results = []
+
+
+def check(name, ok, detail=""):
+    results.append({"name": name, "ok": bool(ok), "detail": str(detail)[:400]})
+    print(f"{'PASS' if ok else 'FAIL'}  {name}" + (f"  :: {detail}" if not ok else ""))
+
+
+def main():
+    with sync_playwright() as p:
+        browser = p.chromium.launch(executable_path=CHROME, args=["--no-sandbox", "--disable-dev-shm-usage"])
+        ctx = browser.new_context(viewport={"width": 1600, "height": 950}, device_scale_factor=2)
+        page = ctx.new_page()
+        errors = []
+        page.on("console", lambda m: errors.append(f"{m.type}: {m.text}") if m.type == "error" else None)
+        page.on("pageerror", lambda e: errors.append(f"pageerror: {e}"))
+
+        page.goto(APP.as_uri())
+        page.wait_for_timeout(1800)
+
+        # --- 1. 基础渲染 ---
+        svg_count = page.eval_on_selector_all("#zoomLayer svg", "els => els.length")
+        check("首屏渲染出 SVG", svg_count >= 1, f"svg count = {svg_count}")
+
+        # --- 2. 离线：无任何网络请求 ---
+        requests = []
+        page.on("request", lambda r: requests.append(r.url))
+        page.wait_for_timeout(500)
+        external = [r for r in requests if not r.startswith("file:") and not r.startswith("data:") and not r.startswith("blob:")]
+        check("运行期零外部网络请求", len(external) == 0, external[:3])
+
+        # --- 3. 控制台无错误 ---
+        check("无 console error / pageerror", len(errors) == 0, errors[:3])
+
+        # --- 4. 编辑触发渲染 ---
+        page.evaluate("(suffix) => window.__lme.setCode(window.__lme.getCode() + suffix)", "\n    Z[新节点] --> Y[另一节点]")
+        page.wait_for_timeout(1200)
+        svg2 = page.eval_on_selector_all("#zoomLayer svg", "els => els.length")
+        check("编辑后重新渲染", svg2 >= 1, f"svg count = {svg2}")
+
+        # --- 5. 兼容层：旧语法检测 ---
+        page.evaluate("""() => window.__lme.setCode(`---
+config:
+  flowchart:
+    defaultRenderer: elk
+---
+flowchart TD
+    A【开始】 --> B[结束]
+    subgraph S
+      C --> D
+`)""")
+        page.wait_for_timeout(1200)
+        badge = page.inner_text("#compatBadge")
+        issues = page.eval_on_selector_all(".compat-item", "els => els.length")
+        check("兼容面板检出问题", issues >= 2, f"badge={badge!r} issues={issues}")
+
+        # --- 6. 自动兼容生效（渲染不报错）---
+        err_visible = page.eval_on_selector("#previewMsg", "el => el.classList.contains('show')")
+        check("自动兼容后渲染成功", not err_visible, "错误面板仍然显示")
+
+        # --- 7. 一键修复写回 ---
+        page.click("#btnFixNow")
+        page.wait_for_timeout(900)
+        code_after = page.evaluate("() => window.__lme.getCode()")
+        check("一键修复写回编辑器", "defaultRenderer" not in code_after and "【" not in code_after, code_after[:200])
+
+        # --- 8. 样例全部可渲染 ---
+        page.click(".tab[data-tab='samples']")
+        page.wait_for_timeout(300)
+        sample_names = page.evaluate("() => Array.from(document.querySelectorAll('.sample-item')).map(e => e.textContent.trim())")
+        bad = []
+        for i, nm in enumerate(sample_names):
+            page.click(f".sample-item[data-idx='{i}']")
+            page.wait_for_timeout(700)
+            shown = page.eval_on_selector("#previewMsg", "el => el.classList.contains('show')")
+            if shown:
+                bad.append(nm)
+        check(f"全部 {len(sample_names)} 个样例均可渲染", not bad, bad[:5])
+
+        # --- 9. SVG 导出（应为纯 SVG text，不是 foreignObject）---
+        page.click(".sample-item[data-idx='0']")
+        page.wait_for_timeout(800)
+        exported = page.evaluate("() => window.__lme.exportSvgText()")
+        check("导出 SVG 含文字节点(<text>)", "<text" in exported and "foreignObject" not in exported,
+              f"len={len(exported)} text={'<text' in exported} foreignObject={'foreignObject' in exported}")
+
+        svg_text = page.evaluate("""() => {
+            const svg = document.querySelector('#zoomLayer svg');
+            return svg ? svg.outerHTML : '';
+        }""")
+        check("预览 SVG 已生成", len(svg_text) > 500, len(svg_text))
+
+        # 导出 PNG 真实可解码
+        import base64
+        png_b64 = page.evaluate("""async () => {
+            const blob = await window.__lme.exportPngBlob(2);
+            const buf = new Uint8Array(await blob.arrayBuffer());
+            let bin = '';
+            for (let i = 0; i < buf.length; i++) bin += String.fromCharCode(buf[i]);
+            return btoa(bin);
+        }""")
+        png_bytes = base64.b64decode(png_b64)
+        check("导出 PNG 是合法 PNG", png_bytes[:8] == b"\x89PNG\r\n\x1a\n" and len(png_bytes) > 2000,
+              f"size={len(png_bytes)} magic={png_bytes[:8]!r}")
+
+        # --- 10. 缩放/适应 ---
+        page.click("#btnZoomIn")
+        page.wait_for_timeout(200)
+        z1 = page.inner_text("#zoomLabel")
+        page.click("#btnZoomFit")
+        page.wait_for_timeout(300)
+        z2 = page.inner_text("#zoomLabel")
+        check("缩放控件工作", z1 != z2 or z1 != "100%", f"{z1} -> {z2}")
+
+        # --- 11. 分享链接往返 ---
+        page.click("#btnShare")
+        page.wait_for_timeout(400)
+        h = page.evaluate("() => location.hash")
+        check("生成分享 hash", len(h) > 20, h[:60])
+
+        # --- 12. 设置面板写 frontmatter ---
+        page.click(".tab[data-tab='settings']")
+        page.wait_for_timeout(300)
+        page.select_option("#cfgLayout", "dagre")
+        page.select_option("#cfgTheme", "default")
+        page.select_option("#cfgLook", "classic")
+        page.click("#btnApplyCfg")
+        page.wait_for_timeout(900)
+        code_cfg = page.evaluate("() => window.__lme.getCode()")
+        check("设置写入 frontmatter", "layout: dagre" in code_cfg and "theme: default" in code_cfg and "look: classic" in code_cfg, code_cfg[:240])
+
+        # --- 13. localStorage 持久化 ---
+        ls = page.evaluate("() => localStorage.getItem('mermaid-local-state-v1')")
+        check("localStorage 已写入", bool(ls and len(ls) > 50), (ls or "")[:80])
+
+        # --- 14. UI 浅色模式 ---
+        page.click("#btnTheme")
+        page.wait_for_timeout(400)
+        ui = page.evaluate("() => document.documentElement.getAttribute('data-ui')")
+        check("界面浅色模式切换", ui == "light", ui)
+        page.click("#btnTheme")
+        page.wait_for_timeout(300)
+
+        # --- 15. 全屏预览 ---
+        page.click("#btnFull")
+        page.wait_for_timeout(500)
+        lb = page.eval_on_selector("#lightbox", "el => !el.classList.contains('hidden')")
+        check("全屏预览打开", lb)
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(300)
+
+        # --- 16. Markdown 多图模式 ---
+        md = "# 文档\n\n```mermaid\nflowchart TD\n  A --> B\n```\n\n文字\n\n```mermaid\nsequenceDiagram\n  A->>B: hi\n```\n"
+        page.evaluate("(md) => window.__lme.setCode(md)", md)
+        page.wait_for_timeout(1500)
+        n_svg = page.eval_on_selector_all("#zoomLayer .blk svg", "els => els.length")
+        nav_visible = page.eval_on_selector("#blockNav", "el => !el.classList.contains('hidden')")
+        check("Markdown 多图：渲染出 2 张图", n_svg == 2, f"svg={n_svg} nav={nav_visible}")
+
+        # --- 17. 分享链接往返（重载后还原） ---
+        page.evaluate("(c) => window.__lme.setCode(c)", "flowchart LR\n  Q1[往返测试] --> Q2[OK]")
+        page.wait_for_timeout(900)
+        page.click("#btnShare")
+        page.wait_for_timeout(500)
+        hash_val = page.evaluate("() => location.hash")
+        page.reload()
+        page.wait_for_timeout(1800)
+        restored = page.evaluate("() => window.__lme.getCode()")
+        check("分享链接：重载后还原代码", "往返测试" in restored, f"hash={hash_val[:40]} code={restored[:80]}")
+
+        # --- 18. 打开本地 .md 文件（多图） ---
+        page.set_input_files("#fileInput", str(ROOT / "test" / "fixtures" / "demo.md"))
+        page.wait_for_timeout(1600)
+        n_md = page.eval_on_selector_all("#zoomLayer .blk svg", "els => els.length")
+        fname = page.input_value("#fileName")
+        check("打开 .md 文件并渲染多图", n_md == 2 and fname == "demo.md", f"svg={n_md} fname={fname}")
+
+        # --- 19. 打开老代码 .mmd，兼容层应自动救回 ---
+        page.set_input_files("#fileInput", str(ROOT / "test" / "fixtures" / "legacy.mmd"))
+        page.wait_for_timeout(1600)
+        err_shown = page.eval_on_selector("#previewMsg", "el => el.classList.contains('show')")
+        n_sv = page.eval_on_selector_all("#zoomLayer svg", "els => els.length")
+        issues = page.eval_on_selector_all(".compat-item", "els => els.length")
+        check("打开老代码：自动兼容后仍渲染成功", (not err_shown) and n_sv >= 1 and issues >= 2,
+              f"err={err_shown} svg={n_sv} issues={issues}")
+
+        # 老代码原文应仍保留在编辑器里（可回退）
+        raw = page.evaluate("() => window.__lme.getCode()")
+        check("老代码原文未被偷偷改写", "defaultRenderer" in raw and "【旧写法】" in raw, raw[:120])
+
+        # --- 20. 超出 maxEdges 上限时给出可操作的提示 ---
+        big = "flowchart TD\n" + "\n".join(f"  N{i}[节点{i}] --> N{i+1}[节点{i+1}]" for i in range(700))
+        page.evaluate("(c) => window.__lme.setCode(c)", big)
+        page.wait_for_timeout(3500)
+        shown = page.eval_on_selector("#previewMsg", "el => el.classList.contains('show')")
+        raise_btn = page.query_selector("#previewMsg [data-act='raise']")
+        hint = page.inner_text("#previewMsg .err-hint") if shown else ""
+        check("超限时报错并给出放宽上限按钮", shown and raise_btn is not None and "maxEdges" in hint,
+              f"shown={shown} btn={bool(raise_btn)} hint={hint[:90]}")
+
+        page.screenshot(path=str(ROOT / "output" / "screenshot-app.png"), full_page=False)
+
+        browser.close()
+
+    failed = [r for r in results if not r["ok"]]
+    print(f"\n=== {len(results) - len(failed)}/{len(results)} passed ===")
+    if failed:
+        for f in failed:
+            print("FAIL:", f["name"], "::", f["detail"])
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
