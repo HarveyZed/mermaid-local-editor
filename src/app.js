@@ -785,6 +785,88 @@ function downloadBlob(blob, filename) {
   setTimeout(() => URL.revokeObjectURL(url), 2000);
 }
 
+// ---------------------------------------------------------------------------
+// 最小 ZIP 打包（STORE 模式，不压缩）
+//
+// 为什么需要：Chromium 对「一次性触发的多个下载」有硬上限（实测同批最多放行 10 个，
+// 其余被静默丢弃，toast 还在报「已导出 N 个」）。多图导出必须打包成一次下载。
+// ---------------------------------------------------------------------------
+const CRC_TABLE = (() => {
+  const t = new Uint32Array(256);
+  for (let i = 0; i < 256; i += 1) {
+    let c = i;
+    for (let k = 0; k < 8; k += 1) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+    t[i] = c >>> 0;
+  }
+  return t;
+})();
+
+function crc32(bytes) {
+  let c = 0xFFFFFFFF;
+  for (let i = 0; i < bytes.length; i += 1) c = CRC_TABLE[(c ^ bytes[i]) & 0xFF] ^ (c >>> 8);
+  return (c ^ 0xFFFFFFFF) >>> 0;
+}
+
+/** 把若干文件打包成 ZIP（STORE，不压缩）。每项给 text 或 bytes 之一 */
+function makeZip(files) {
+  const enc = new TextEncoder();
+  const chunks = [];
+  const central = [];
+  let offset = 0;
+  files.forEach((f) => {
+    const nameBytes = enc.encode(f.name);
+    const data = f.bytes ? f.bytes : enc.encode(f.text);
+    const crc = crc32(data);
+    const local = new Uint8Array(30 + nameBytes.length);
+    const dv = new DataView(local.buffer);
+    dv.setUint32(0, 0x04034b50, true);      // 本地文件头
+    dv.setUint16(4, 20, true);
+    dv.setUint16(6, 0x0800, true);          // bit11：文件名用 UTF-8
+    dv.setUint16(8, 0, true);               // STORE
+    dv.setUint16(10, 0, true);
+    dv.setUint16(12, 0x21, true);
+    dv.setUint32(14, crc, true);
+    dv.setUint32(18, data.length, true);
+    dv.setUint32(22, data.length, true);
+    dv.setUint16(26, nameBytes.length, true);
+    dv.setUint16(28, 0, true);
+    local.set(nameBytes, 30);
+    chunks.push(local, data);
+
+    const cen = new Uint8Array(46 + nameBytes.length);
+    const cv = new DataView(cen.buffer);
+    cv.setUint32(0, 0x02014b50, true);      // 中央目录
+    cv.setUint16(4, 20, true);
+    cv.setUint16(6, 20, true);
+    cv.setUint16(8, 0x0800, true);
+    cv.setUint16(10, 0, true);
+    cv.setUint16(12, 0, true);
+    cv.setUint16(14, 0x21, true);
+    cv.setUint32(16, crc, true);
+    cv.setUint32(20, data.length, true);
+    cv.setUint32(24, data.length, true);
+    cv.setUint16(28, nameBytes.length, true);
+    cv.setUint16(30, 0, true);
+    cv.setUint16(32, 0, true);
+    cv.setUint16(34, 0, true);
+    cv.setUint16(36, 0, true);
+    cv.setUint32(38, 0, true);
+    cv.setUint32(42, offset, true);
+    cen.set(nameBytes, 46);
+    central.push(cen);
+    offset += local.length + data.length;
+  });
+  const cenSize = central.reduce((n, c) => n + c.length, 0);
+  const end = new Uint8Array(22);
+  const ev = new DataView(end.buffer);
+  ev.setUint32(0, 0x06054b50, true);        // EOCD
+  ev.setUint16(8, files.length, true);
+  ev.setUint16(10, files.length, true);
+  ev.setUint32(12, cenSize, true);
+  ev.setUint32(16, offset, true);
+  return new Blob([...chunks, ...central, end], { type: 'application/zip' });
+}
+
 function baseName() {
   return (state.fileName || 'diagram').replace(/\.(mmd|mermaid|md|txt)$/i, '');
 }
@@ -817,11 +899,11 @@ async function exportSvg() {
       downloadBlob(new Blob([serializeSvg(svgs[0])], { type: 'image/svg+xml;charset=utf-8' }), `${baseName()}.svg`);
       toast('已导出 SVG');
     } else {
-      // 多个 SVG 根节点不能拼在一个文件里，按序号分别导出
-      svgs.forEach((svg, i) => {
-        downloadBlob(new Blob([serializeSvg(svg)], { type: 'image/svg+xml;charset=utf-8' }), `${baseName()}-${i + 1}.svg`);
-      });
-      toast(`已导出 ${svgs.length} 个 SVG`);
+      // 一次触发多个下载会被浏览器静默截断（Chromium 同批最多放行 10 个），
+      // 所以多图统一打包成一个 ZIP，一次下载，个数不受限。
+      const files = svgs.map((s, i) => ({ name: `${baseName()}-${i + 1}.svg`, text: serializeSvg(s) }));
+      downloadBlob(makeZip(files), `${baseName()}.zip`);
+      toast(`已导出 ${svgs.length} 个 SVG（打包为 ${baseName()}.zip）`);
     }
   } catch (e) {
     toast('导出失败：' + String(e).slice(0, 120));
@@ -863,12 +945,23 @@ async function exportPng(scale = 2) {
   try {
     const svgs = await renderForExport();
     if (!svgs.length) return;
-    const png = await rasterizeSvg(svgs[0], scale);
-    if (!png) throw new Error('PNG 编码失败');
-    downloadBlob(png, `${baseName()}.png`);
-    toast(svgs.length > 1
-      ? `已导出第 1 个 PNG（共 ${svgs.length} 个图，PNG 仅支持单图）`
-      : `已导出 PNG (${png.size} 字节)`);
+    if (svgs.length === 1) {
+      const png = await rasterizeSvg(svgs[0], scale);
+      if (!png) throw new Error('PNG 编码失败');
+      downloadBlob(png, `${baseName()}.png`);
+      toast(`已导出 PNG (${png.size} 字节)`);
+    } else {
+      // 多图同样一次下载：打包成 ZIP（浏览器会截断一次性触发的多个下载）
+      const files = [];
+      for (let i = 0; i < svgs.length; i += 1) {
+        toast(`正在生成 PNG ${i + 1}/${svgs.length}…`, 30000);
+        const blob = await rasterizeSvg(svgs[i], scale);
+        if (!blob) continue;
+        files.push({ name: `${baseName()}-${i + 1}.png`, bytes: new Uint8Array(await blob.arrayBuffer()) });
+      }
+      downloadBlob(makeZip(files), `${baseName()}-png.zip`);
+      toast(`已导出 ${files.length} 个 PNG（打包为 ${baseName()}-png.zip）`);
+    }
   } catch (e) {
     toast('导出 PNG 失败：' + String(e).slice(0, 120));
   }

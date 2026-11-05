@@ -2,6 +2,7 @@ import base64
 import json
 import pathlib
 import sys
+import xml.etree.ElementTree as ET
 
 from playwright.sync_api import sync_playwright
 
@@ -110,42 +111,79 @@ flowchart TD
         downloads = []
         page.on("download", lambda d: downloads.append(d))
         page.click("#btnSvg")
-        page.wait_for_timeout(3000)
+        page.wait_for_timeout(4000)
 
         toast_text = page.evaluate("() => document.querySelector('#toast')?.innerText || ''")
         check("批量导出 SVG 未报错", "导出失败" not in toast_text, f"toast={toast_text!r}")
 
-        import xml.etree.ElementTree as ET
-        docs = []
-        for d in downloads:
-            try:
-                docs.append((d.suggested_filename, pathlib.Path(d.path()).read_text(encoding="utf-8")))
-            except Exception as exc:  # 下载还没落盘
-                docs.append((d.suggested_filename, f"ERR:{exc}"))
+        # 多图必须打包成**一次**下载：Chromium 对一次性触发的多个下载有硬上限
+        # （实测同批只放行 10 个，其余被静默丢弃，toast 却还在报「已导出 N 个」）
+        check("多图导出只产生 1 次下载（避免浏览器截断）", len(downloads) == 1,
+              f"下载数={len(downloads)} 名={[d.suggested_filename for d in downloads]}")
+        check("多图导出的是 ZIP 包", downloads and downloads[0].suggested_filename.endswith(".zip"),
+              [d.suggested_filename for d in downloads])
 
-        check("批量导出产出了多个 SVG 文件", len(docs) >= 2, f"下载数={len(docs)} 名={[d[0] for d in docs]}")
-
+        import zipfile
         bad_xml = []
-        for name, text in docs:
-            try:
-                root = ET.fromstring(text)
-                if root.tag.split("}")[-1] != "svg":
-                    bad_xml.append(f"{name}: 根节点是 {root.tag}")
-            except Exception as exc:
-                bad_xml.append(f"{name}: XML 解析失败 {exc}")
-        check("每个导出的 SVG 都是合法单根 XML", not bad_xml, bad_xml[:3])
+        names = []
+        if downloads:
+            zpath = pathlib.Path(downloads[0].path())
+            with zipfile.ZipFile(zpath) as zf:
+                names = zf.namelist()
+                check("ZIP 内容校验通过", zf.testzip() is None, names)
+                check("ZIP 内含全部 2 个 SVG", len(names) == 2, names)
+                for nm in names:
+                    text = zf.read(nm).decode("utf-8")
+                    try:
+                        root = ET.fromstring(text)
+                        if root.tag.split("}")[-1] != "svg":
+                            bad_xml.append(f"{nm}: 根节点是 {root.tag}")
+                    except Exception as exc:
+                        bad_xml.append(f"{nm}: XML 解析失败 {exc}")
+                    if "<?xml" not in text or "xmlns:xlink" not in text:
+                        bad_xml.append(f"{nm}: 缺 XML 声明或 xmlns:xlink")
+                    if "foreignObject" in text:
+                        bad_xml.append(f"{nm}: 含 foreignObject")
+        check("ZIP 内每个 SVG 都是合法单根 XML", not bad_xml, bad_xml[:3])
+        check("ZIP 内文件名按序号区分", names == sorted(names) and len(set(names)) == len(names), names)
 
-        check("导出的 SVG 带 XML 声明与 xmlns:xlink",
-              all(("<?xml" in t and 'xmlns:xlink' in t) for _, t in docs),
-              [n for n, t in docs if "<?xml" not in t or "xmlns:xlink" not in t][:3])
-
-        check("导出文件名按序号区分", len({n for n, _ in docs}) == len(docs), [n for n, _ in docs])
+        # 23 个图块：曾经因为「一次性触发多个下载」被浏览器截断到只剩 10 个
+        many23 = "# 压力\n\n" + "\n\n".join(
+            "```mermaid\nflowchart TD\n  A[%d] --> B[%d]\n```" % (i, i + 1) for i in range(23))
+        page.evaluate("(md) => window.__lme.setCode(md)", many23)
+        page.wait_for_timeout(3500)
+        d23 = []
+        page.on("download", lambda d: d23.append(d))
+        page.click("#btnSvg")
+        page.wait_for_timeout(6000)
+        ok23 = False
+        detail23 = f"下载数={len(d23)}"
+        if len(d23) == 1:
+            with zipfile.ZipFile(pathlib.Path(d23[0].path())) as zf:
+                inner = zf.namelist()
+                detail23 = f"ZIP 内 {len(inner)} 个文件"
+                ok23 = len(inner) == 23 and zf.testzip() is None
+                if ok23:
+                    bad = []
+                    for nm in inner:
+                        try:
+                            root = ET.fromstring(zf.read(nm).decode("utf-8"))
+                            if root.tag.split("}")[-1] != "svg":
+                                bad.append(nm)
+                        except Exception:
+                            bad.append(nm)
+                    ok23 = not bad
+                    detail23 += f"，非法 XML {len(bad)} 个"
+        check("23 个图块一次导出全部进 ZIP（不被浏览器截断）", ok23, detail23)
 
         # 回归缺陷：markdown 多块时 htmlLabels:false 没传到图块
         # → 导出的 SVG 带 foreignObject → PNG 画布被污染 → toBlob 抛 SecurityError
+        with_fo = []
+        if downloads:
+            with zipfile.ZipFile(pathlib.Path(downloads[0].path())) as zf:
+                with_fo = [nm for nm in zf.namelist() if "foreignObject" in zf.read(nm).decode("utf-8")]
         check("导出的 SVG 不含 foreignObject（htmlLabels:false 已传到图块）",
-              all("foreignObject" not in t for _, t in docs),
-              [n for n, t in docs if "foreignObject" in t][:3])
+              not with_fo, with_fo[:3])
 
         png_ok, png_detail = True, ""
         try:
