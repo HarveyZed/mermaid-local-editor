@@ -21,5 +21,18 @@
     "esbuild": "^0.25.0",
     "pako": "^2.1.0",
     "yaml": "^2.7.1"
-  }
+  },
+  "license": "MIT",
+  "description": "单文件离线 Mermaid v12 编辑器 —— 双击即用，零网络请求，自带旧语法自动兼容层",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/HarveyZed/mermaid-local-editor.git"
+  },
+  "keywords": [
+    "mermaid",
+    "diagram",
+    "offline",
+    "single-file",
+    "mermaid-v12"
+  ]
 }

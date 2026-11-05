@@ -5,6 +5,11 @@
 
 产物：`output/mermaid-local-editor.html`（约 5.85 MB，**双击即可用**，无需安装、无需服务器、无需联网）。
 
+> **直接下载成品**：前往 [Releases](https://github.com/HarveyZed/mermaid-local-editor/releases) 下载
+> `mermaid-local-editor.html`，双击即可使用。仓库里只放源码，产物不进 git 历史。
+
+License: [MIT](LICENSE)
+
 ---
 
 ## 为什么需要它
